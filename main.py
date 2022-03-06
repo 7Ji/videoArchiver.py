@@ -117,6 +117,7 @@ def encoder(
     dir_work_sub: pathlib.Path,
     file_raw: pathlib.Path, 
     file_out: pathlib.Path, 
+    file_done: pathlib.Path,
     encode_type: str, 
     stream_id: int, # Is used as stream counts when preview + audio
     stream_type: str,
@@ -124,17 +125,16 @@ def encoder(
     size_raw: int, 
     lossless: bool
 ):  
-    file_done = pathlib.Path(
-        dir_work_sub,
-        f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}.done'
-    )
-    if file_done.exists():
-        return
-    if file_out is None:
-        file_out = pathlib.Path(
-            dir_work_sub,
-            f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}.nut'
-        )
+    # if file_done is None:
+    #     file_done = pathlib.Path(
+    #         dir_work_sub,
+    #         f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}.done'
+    #     )
+    # if file_out is None:
+    #     file_out = pathlib.Path(
+    #         dir_work_sub,
+    #         f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}.nut'
+    #     )
     file_concat_pickle = pathlib.Path(
         dir_work_sub,
         f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}_concat.pkl'
@@ -331,7 +331,6 @@ def encoder(
                 p.kill()
             except NameError:
                 pass
-)
 def muxer(
     dir_work_sub: pathlib.Path,
     file_raw: pathlib.Path,
@@ -402,6 +401,108 @@ if __name__ == '__main__':
                         )
                 dir_work_sub.mkdir()
                 dirs_work_sub.append(dir_work_sub)
-                for stream in i:
+                threads_archive = []
+                threads_preview = []
+                streams_archive = []
+                streams_preview = []
+                audios = []
+                file_archive = pathlib.Path(
+                    dir_archive,
+                    i.name
+                )
+                file_preview = pathlib.Path(
+                    dir_preview,
+                    i.name
+                )
+                if file_archive.exists() and file_preview.exists():
                     pass
+                else:
+                    for stream_id, stream in enumerate(i):
+                        stream_type = stream['type']
+                        stream_duration = stream['duration']
+                        stream_size = stream['size']
+                        stream_lossless = stream['lossless']
+                        if stream_type in ('video', 'audio'):
+                            if stream_type == 'video':
+                                # Archive
+                                file_stream_archive = pathlib.Path(
+                                    dir_work_sub,
+                                    f'{i.stem}_archive_{stream_id}_{stream_type}.nut'
+                                )
+                                file_stream_done_archive = pathlib.Path(
+                                    dir_work_sub,
+                                    f'{i.stem}_archive_{stream_id}_{stream_type}.done'
+                                )
+                                file_stream_preview = pathlib.Path(
+                                    dir_work_sub,
+                                    f'{i.stem}_preview_{stream_id}_{stream_type}.nut'
+                                )
+                                file_stream_done_preview = pathlib.Path(
+                                    dir_work_sub,
+                                    f'{i.stem}_preview_{stream_id}_{stream_type}.done'
+                                )
+                                if not file_stream_archive.exists() and file_stream_done_archive.exists():
+                                    file_stream_done_archive.unlink()
+                                if not file_stream_preview.exists() and file_stream_done_preview.exists():
+                                    file_stream_done_preview.unlink()
+                                streams_archive.append(file_stream_archive)
+                                streams_preview.append(file_stream_preview)
+                                if not file_stream_done_archive.exists():
+                                    threads_archive.append(
+                                        threading.Thread(
+                                            target=encoder,
+                                            args=(
+                                                dir_work_sub, 
+                                                i,
+                                                file_stream_archive, #file_out
+                                                file_stream_done_archive,
+                                                'archive',
+                                                stream_id,
+                                                'video',
+                                                stream_duration,
+                                                stream_size,
+                                                stream_lossless
+                                            )
+                                        )
+                                    )
+                                    threads_archive[-1].start()
+                                if not file_stream_done_preview.exists():
+                                    threads_preview.append(
+                                        threading.Thread(
+                                            target=encoder,
+                                            args=(
+                                                dir_work_sub, 
+                                                i,
+                                                file_stream_preview, #file_out
+                                                file_stream_done_preview,
+                                                'preview',
+                                                stream_id,
+                                                'video',
+                                                stream_duration,
+                                                stream_size,
+                                                stream_lossless
+                                            )
+                                        )
+                                    )
+                            else: # Audio
+                                pass
+                        else:
+                            streams_archive.append(None)
+                            streams_preview.append(None)
+                muxer_video = threading.Thread(
+                    target=muxer,
+                    args=(
+                        dir_work_sub,
+                        i,
+                        pathlib.Path(
+                            dir_work_sub,
+
+                        ),
+                        streams_archive,
+                        threads_archive
+                    )
+                )
+                muxer_audio = ''
+
+                work.append(i)
         time.sleep(3600)
