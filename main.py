@@ -29,6 +29,8 @@ waitpool_av1 = []
 lock_264 = threading.Lock()
 lock_av1 = threading.Lock()
 db = {}
+work = []
+dirs_work_sub = []
 
 def get_duration_and_size(media: pathlib.Path, stream_id: int, stream_type: str):
     try:
@@ -47,6 +49,9 @@ def get_duration_and_size(media: pathlib.Path, stream_id: int, stream_type: str)
                 m = reg_time.search(line)
                 if m:
                     t = m[1]
+            else:
+                p.kill()
+                break
         m = reg_complete[stream_type].search(line)
         if m:
             s = int(m[1])
@@ -111,6 +116,7 @@ def scan_dir(d: pathlib.Path):
 def encoder(
     dir_work_sub: pathlib.Path,
     file_raw: pathlib.Path, 
+    file_out: pathlib.Path, 
     encode_type: str, 
     stream_id: int, # Is used as stream counts when preview + audio
     stream_type: str,
@@ -124,10 +130,11 @@ def encoder(
     )
     if file_done.exists():
         return
-    file_work = pathlib.Path(
-        dir_work_sub,
-        f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}.nut'
-    )
+    if file_out is None:
+        file_out = pathlib.Path(
+            dir_work_sub,
+            f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}.nut'
+        )
     file_concat_pickle = pathlib.Path(
         dir_work_sub,
         f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}_concat.pkl'
@@ -135,13 +142,13 @@ def encoder(
     start = time_zero
     size_exist = 0
     concat_list = []
-    if file_work.exists() and file_work.stat().st_size:
-        file_check = file_work
+    if file_out.exists() and file_out.stat().st_size:
+        file_check = file_out
         suffix = 0
         while file_check.exists() and file_check.stat().st_size:
             time_delta, size_delta = get_duration_and_size(file_check, 0, stream_type)
             if suffix == 0 and abs(duration - time_delta) < time_second:
-                # First file, that is, file_work, its length is already OK, consider it finished
+                # First file, that is, file_out, its length is already OK, consider it finished
                 file_done.touch()
                 return
             start += time_delta
@@ -158,7 +165,7 @@ def encoder(
         )
         try:
             p = subprocess.Popen((
-                'ffmpeg', '-i', file_work, '-c', 'copy', '-map', '0', '-y', file_recovery
+                'ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery
             ), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             reader = p.stderr
             while p.poll() is None:
@@ -174,14 +181,12 @@ def encoder(
                     m = reg_time.search(line)
                     if m:
                         t = m[1]
-                    else:
-                        m = reg_complete[stream_type].search(line)
-                        if m:
-                            s = int(m[1])
-                            p.kill()
-                            break
                 else:
+                    p.kill()
                     break
+            m = reg_complete[stream_type].search(line)
+            if m:
+                s = int(m[1])
             if p.wait():
                 file_recovery.unlink()
             else:
@@ -195,7 +200,7 @@ def encoder(
                 concat_list.append(file_check)
         except KeyboardInterrupt:
             p.kill()
-        file_work.unlink()
+        file_out.unlink()
         with file_concat_pickle.open('wb') as f:
             pickle.dump({
                 'list': concat_list,
@@ -213,15 +218,20 @@ def encoder(
     if concat_list:
         # We've already transcoded this
         if size_raw and size_exist > size_raw * 0.9:
+            file_copy = pathlib.Path(
+                dir_work_sub,
+                f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}_copy.nut'
+            )
             # The already transcoded part is too inefficient
             if stream_type == 'audio' and encode_type == 'preview':
                 subprocess.run((
-                    'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', '0:a', '-y',  file_work
+                    'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', '0:a', '-y',  file_copy
                 ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
                 subprocess.run((
-                    'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_work
+                    'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy
                 ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            shutil.move(file_copy, file_out)
             file_done.touch()
             return 
         if start >= duration or  duration - start < time_second:
@@ -241,7 +251,7 @@ def encoder(
                 'ffmpeg', '-f', 'concat', '-safe', '0', '-i', file_list, '-c', 'copy', '-map', '0', '-y', file_concat
             ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
                 pass
-            shutil.move(file_concat, file_work)
+            shutil.move(file_concat, file_out)
             file_done.touch()
             return
     if stream_type == 'video':
@@ -260,20 +270,20 @@ def encoder(
                     with lock_264:
                         waitpool_264.append(waiter)
                     waiter.wait()
-                    p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:v', 'libx264', '-crf', '18', '-preset', 'veryslow', '-map', f'0:{stream_id}', '-y', file_work), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:v', 'libx264', '-crf', '18', '-preset', 'veryslow', '-map', f'0:{stream_id}', '-y', file_out), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 else:
                     with lock_av1:
                         waitpool_av1.append(waiter)
                     waiter.wait()
-                    p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:v', 'libaom-av1', '-crf', '63', '-cpu-used', '2', '-map', f'0:{stream_id}', '-y', file_work), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:v', 'libaom-av1', '-crf', '63', '-cpu-used', '2', '-map', f'0:{stream_id}', '-y', file_out), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             else: # Audio
                 if encode_type == 'archive':
-                    p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:a', 'libfdk_aac', '-vbr', '5', '-map', f'0:{stream_id}', '-y', file_work), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                    p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:a', 'libfdk_aac', '-vbr', '5', '-map', f'0:{stream_id}', '-y', file_out), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 else:
                     if stream_id == 1:
-                        p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-y', file_work), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                        p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-y', file_out), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                     else:
-                        p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-filter_complex', f'amix=inputs={stream_id}:duration=longest','-y', file_work), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                        p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-filter_complex', f'amix=inputs={stream_id}:duration=longest','-y', file_out), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             if not lossless:
                 reader = p.stderr
                 while p.poll() is None:
@@ -291,32 +301,63 @@ def encoder(
                             inefficient = True
                             p.kill()
                             break
-                        else:
-                            m = reg_complete[stream_type].search(line)
-                            if m and int(m[1]) >= size_allow:
-                                inefficient = True
-                                p.kill()
-                                break
                     else:
+                        p.kill()
                         break
+                m = reg_complete[stream_type].search(line)
+                if m and int(m[1]) >= size_allow:
+                    inefficient = True
                 if inefficient:
+                    file_copy = pathlib.Path(
+                        dir_work_sub,
+                        f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}_copy.nut'
+                    )
                     if stream_type == 'audio' and encode_type == 'preview':
                         subprocess.run((
-                            'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', '0:a', '-y', file_work
+                            'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', '0:a', '-y', file_copy
                         ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     else:
                         subprocess.run((
-                            'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_work
+                            'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy
                         ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    shutil.move(file_copy, file_out)
                     file_done.touch()
                     return 
-            p.wait()
+            if p.wait() == 0:
+                file_done.touch()
+                break
         except KeyboardInterrupt:
             try:
                 p.kill()
             except NameError:
                 pass
+)
+def muxer(
+    dir_work_sub: pathlib.Path,
+    file_raw: pathlib.Path,
+    file_out: pathlib.Path,
+    streams: list,
+    threads: list = None,
+):
+    if threads is not None and threads:
+        for thread in threads:
+            thread.join()
+    inputs = ['-i', file_raw]
+    input_id = 0
+    mappers = []
+    for stream_id, stream in enumerate(streams):
+        if stream is None:
+            mappers += ['-map', f'0:{stream_id}']
+        else:
+            inputs += ['-i', stream]
+            input_id += 1
+            mappers += ['-map', f'{input_id}:0']
+    subprocess.run((
+        'ffmpeg', *inputs, '-c', 'copy', *mappers, '-y', file_out
+    ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
 
+            
 def scheduler():
     global waitpool_264
     global waitpool_av1
@@ -339,11 +380,28 @@ def scheduler():
             time.sleep(60)
         else:
             time.sleep(600)
-            
-t_scheduler = threading.Thread(target = scheduler)
-t_scheduler.start()
 
-scan_dir(dir_raw)
-print(db)
-        
-            
+if __name__ == '__main__':
+    t_scheduler = threading.Thread(target = scheduler)
+    t_scheduler.start()
+
+    while True:
+        scan_dir(dir_raw)
+        for i in db:
+            if i not in work:
+                dir_work_sub = pathlib.Path(
+                    dir_work,
+                    i.stem
+                )
+                if dir_work_sub in dirs_work_sub:
+                    suffix = 0
+                    while dir_work_sub in dirs_work_sub:
+                        dir_work_sub = pathlib.Path(
+                            dir_work,
+                            i.stem + str(suffix)
+                        )
+                dir_work_sub.mkdir()
+                dirs_work_sub.append(dir_work_sub)
+                for stream in i:
+                    pass
+        time.sleep(3600)
