@@ -35,7 +35,7 @@ work = []
 dirs_work_sub = []
 
 
-def ffmpeg_time_size_poller(p: subprocess.Popen, size_allow:int=None):
+def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int=None):
     if size_allow is not None:
         inefficient = False
     reader = p.stderr
@@ -85,7 +85,7 @@ def ffmpeg_time_size_poller(p: subprocess.Popen, size_allow:int=None):
 def get_duration_and_size(media: pathlib.Path, stream_id: int, stream_type: str):
     try:
         p = subprocess.Popen(('ffmpeg', '-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        r, t, s = ffmpeg_time_size_poller(p)
+        r, t, s = ffmpeg_time_size_poller(p, stream_type)
     except KeyboardInterrupt:
         p.kill()
     return t, s
@@ -152,6 +152,14 @@ def encoder(
     lossless: bool
 ):  
     if encode_type == 'preview' and stream_type == 'audio':
+        if stream_id == 1:
+            debug_title = f'{file_raw}: Stream ? (audio) preview'
+        else:
+            debug_title = f'{file_raw}: Amix ({stream_id} audios) preview'
+    else:
+        debug_title = f'{file_raw}: Stream {stream_id} ({stream_type}) {encode_type}'
+    print(f'{debug_title} encoding started')
+    if encode_type == 'preview' and stream_type == 'audio':
         prefix = f'{file_raw.stem}_preview_audio'
     else:
         prefix = f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}'
@@ -165,6 +173,7 @@ def encoder(
     check_efficiency = encode_type == 'archive'  and not lossless 
     try:
         if file_out.exists() and file_out.stat().st_size:
+            print(f'{debug_title} potentially broken before')
             file_check = file_out
             suffix = 0
             while file_check.exists() and file_check.stat().st_size:
@@ -207,7 +216,7 @@ def encoder(
                     'ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery
                 ), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             if p is subprocess.Popen:
-                r, t, s = ffmpeg_time_size_poller(p)
+                r, t, s = ffmpeg_time_size_poller(p, stream_type)
                 if r == 0:
                     shutil.move(file_recovery, file_check)
                     start += t
@@ -296,8 +305,13 @@ def encoder(
                     with lock_av1:
                         waitpool_av1.append(waiter)
                     waiter.wait()
-            p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            if check_efficiency and ffmpeg_time_size_poller(p, size_allow):
+            if check_efficiency:
+                p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            else:
+                p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f'{debug_title} started')
+            if check_efficiency and ffmpeg_time_size_poller(p, stream_type, size_allow):
+                print(f'{debug_title} inefficient')
                 file_copy = pathlib.Path(
                     dir_work_sub,
                     f'{prefix}_copy.nut'
@@ -308,9 +322,12 @@ def encoder(
                 shutil.move(file_copy, file_out)
                 file_done.touch()
                 return 
+            print(f'{debug_title} waiting to end')
             if p.wait() == 0:
                 file_done.touch()
+                print(f'{debug_title} ended {file_done}')
                 break
+            print(f'{debug_title} encoding not good')
     except KeyboardInterrupt:
         try:
             p.kill()
@@ -373,19 +390,18 @@ def scheduler():
             time.sleep(5)
             cpu_percent = psutil.cpu_percent()
         if wake:
-            time.sleep(60)
+            time.sleep(10)
         else:
-            time.sleep(600)
+            time.sleep(60)
 
 if __name__ == '__main__':
     t_scheduler = threading.Thread(target = scheduler)
-    t_scheduler.start()
     while True:
         work_count = len(work)
         scan_dir(dir_raw)
         with lock_db:
-            for i in db:
-                if i not in work:
+            for i, j in db.items():
+                if j is not None and i not in work:
                     dir_work_sub = pathlib.Path(
                         dir_work,
                         i.stem
@@ -397,7 +413,8 @@ if __name__ == '__main__':
                                 dir_work,
                                 i.stem + str(suffix)
                             )
-                    dir_work_sub.mkdir()
+                    if not dir_work_sub.exists():
+                        dir_work_sub.mkdir()
                     dirs_work_sub.append(dir_work_sub)
                     threads_archive = []
                     threads_preview = []
@@ -421,7 +438,7 @@ if __name__ == '__main__':
                         if i.exists():
                             i.unlink()
                     else:
-                        for stream_id, stream in enumerate(i):
+                        for stream_id, stream in enumerate(j):
                             stream_type = stream['type']
                             stream_duration = stream['duration']
                             stream_size = stream['size']
@@ -450,7 +467,7 @@ if __name__ == '__main__':
                                                     file_stream_done_archive,
                                                     'archive',
                                                     stream_id,
-                                                    'video',
+                                                    stream_type,
                                                     stream_duration,
                                                     stream_size,
                                                     stream_lossless
@@ -489,6 +506,7 @@ if __name__ == '__main__':
                                                     )
                                                 )
                                             )
+                                            threads_preview[-1].start()
                                     else:
                                         audios.append(stream_id)
                                         audios_size += stream_size
@@ -523,8 +541,32 @@ if __name__ == '__main__':
                                     dir_work_sub,
                                     f'{i.stem}_preview_audio.nut'
                                 )
-                                streams_preview.append()
-                                pass
+                                file_stream_done_preview = pathlib.Path(
+                                    dir_work_sub,
+                                    f'{i.stem}_preview_audio.done'
+                                )
+                                streams_preview.append(file_stream_preview)
+                                if not file_stream_preview.exists() and file_stream_done_preview.exists():
+                                    file_stream_done_preview.unlink()
+                                if not file_stream_done_preview.exists():
+                                    threads_preview.append(
+                                        threading.Thread(
+                                            target=encoder,
+                                            args=(
+                                                dir_work_sub, 
+                                                i,
+                                                file_stream_preview, #file_out
+                                                file_stream_done_preview,
+                                                'preview',
+                                                len(audios),
+                                                'audio',
+                                                audios_duration,
+                                                audios_size,
+                                                True
+                                            )
+                                        )
+                                    )
+                                    threads_preview[-1].start()
                             muxers.append(
                                 threading.Thread(
                                     target=muxer,
@@ -551,7 +593,9 @@ if __name__ == '__main__':
                         )
                         thread_cleaner.start()
                         work.append(i)
+        if not t_scheduler.is_alive():
+            t_scheduler.start()
         if len(work) != work_count:
             time.sleep(60)
         else:
-            time.sleep(3600)
+            time.sleep(600)
