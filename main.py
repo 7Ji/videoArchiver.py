@@ -263,6 +263,22 @@ def encoder(
         # Real encoding happenes below
         if check_efficiency:
             size_allow = size_raw * 0.9 - size_exist
+        args_in = ('ffmpeg', '-ss', str(start), '-i', file_raw)
+        args_map = ('-map', f'0:{stream_id}')
+        args_out = ('-y', file_out)
+        if stream_type == 'video':
+            if encode_type == 'archive':
+                args = (*args_in,  '-c:v', 'libx264', '-crf', '18', '-preset', 'veryslow', *args_map, *args_out)
+            else:
+                args = (*args_in,  '-c:v', 'libaom-av1', '-crf', '63', '-cpu-used', '2', *args_map, *args_out)
+        else: # Audio
+            if encode_type == 'archive':
+                args = (*args_in, '-c:a', 'libfdk_aac', '-vbr', '5', *args_map, *args_out)
+            else:
+                if stream_id == 1:
+                    args = (*args_in, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', *args_out)
+                else:
+                    args = (*args_in, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-filter_complex', f'amix=inputs={stream_id}:duration=longest', *args_out)
         while True:
             if stream_type == 'video':
                 waiter = threading.Event()
@@ -270,20 +286,11 @@ def encoder(
                     with lock_264:
                         waitpool_264.append(waiter)
                     waiter.wait()
-                    p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:v', 'libx264', '-crf', '18', '-preset', 'veryslow', '-map', f'0:{stream_id}', '-y', file_out), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 else:
                     with lock_av1:
                         waitpool_av1.append(waiter)
                     waiter.wait()
-                    p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:v', 'libaom-av1', '-crf', '63', '-cpu-used', '2', '-map', f'0:{stream_id}', '-y', file_out), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            else: # Audio
-                if encode_type == 'archive':
-                    p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:a', 'libfdk_aac', '-vbr', '5', '-map', f'0:{stream_id}', '-y', file_out), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                else:
-                    if stream_id == 1:
-                        p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-y', file_out), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-                    else:
-                        p = subprocess.Popen(('ffmpeg', '-ss', str(start), '-i', file_raw, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-filter_complex', f'amix=inputs={stream_id}:duration=longest','-y', file_out), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             if check_efficiency and ffmpeg_time_size_poller(p, size_allow):
                 file_copy = pathlib.Path(
                     dir_work_sub,
@@ -306,6 +313,7 @@ def encoder(
 def muxer(
     dir_work_sub: pathlib.Path,
     file_raw: pathlib.Path,
+    file_cache: pathlib.Path,
     file_out: pathlib.Path,
     streams: list,
     threads: list = None,
@@ -322,7 +330,7 @@ def muxer(
         else:
             inputs += ['-i', stream]
             input_id += 1
-            mappers += ['-map', f'{input_id}:0']
+            mappers += ['-map', f'{input_id}']
     subprocess.run((
         'ffmpeg', *inputs, '-c', 'copy', *mappers, '-y', file_out
     ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
