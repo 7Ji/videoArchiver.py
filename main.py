@@ -430,7 +430,7 @@ def db_write():
             with open(file_db, 'wb') as f:
                 pickle.dump(db, f)
             print('[Database] Saved')
-            db_last = db
+            db_last = {i:j for i, j in db.items()}
 
             
 def scheduler():
@@ -460,7 +460,7 @@ if __name__ == '__main__':
     if file_db.exists():
         with open(file_db, 'rb') as f:
             db = pickle.load(f)
-        db_last = db
+        db_last = {i:j for i,j in db.items()}
     t_scheduler = threading.Thread(target = scheduler)
     try:
         while True:
