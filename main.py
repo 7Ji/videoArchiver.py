@@ -58,29 +58,31 @@ class progressBar:
     def display(self):
         bar_complete = int(self.percent * self.bar_length)
         bar_incomplete = self.bar_length - bar_complete
-        print(''.join([
-            self.title,
-            ' ',
-            ''.join(['█' for i in range(bar_complete)]),
-            ''.join(['-' for i in range(bar_incomplete)]),
-            f'{int(self.percent * 100)}%'.rjust(4)
-        ]),
-            end='\r'
-        )
+        if self.percent == 0 or bar_complete != self.bar_complete:
+            print(''.join([
+                self.title,
+                ' ',
+                ''.join(['█' for i in range(bar_complete)]),
+                ''.join(['-' for i in range(bar_incomplete)]),
+                f'{int(self.percent * 100)}%'.rjust(4)
+            ]),
+                end='\r'
+            )
+            self.bar_complete = bar_complete
 
     def set(self, percent):
         self.check_terminal()
         self.percent = max(min(percent, 1), 0)
         self.display()
-        if self.percent == 1:
-            print()
+        # if self.percent == 1:
+        #     print()
 
     def add(self, delta_percent):
         self.check_terminal()
         self.percent = max(min(self.percent + delta_percent, 1), 0)
         self.display()
-        if self.percent == 1:
-            print()
+        # if self.percent == 1:
+        #     print()
 
 def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int=None, progress_bar:progressBar=None, target_time:datetime.timedelta=None):
     if size_allow is not None:
@@ -453,6 +455,26 @@ def scheduler():
         time.sleep(5)
     print('[Scheduler] Exited')
 
+def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, stream_duration, stream_size, stream_lossless, streams, threads, amix=False):
+    if amix:
+        file_stream = dir_work_sub / f'{file_raw.stem}_preview_audio.nut'
+        file_stream_done = dir_work_sub / f'{file_raw.stem}_preview_audio.done'
+    else:
+        file_stream = dir_work_sub / f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}.nut'
+        file_stream_done = dir_work_sub / f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}.done'
+    streams.append(file_stream)
+    if not file_stream.exists() and file_stream_done.exists():
+        file_stream_done.unlink()
+    if not file_stream_done.exists():
+        threads.append(threading.Thread(target=encoder, args=(
+            dir_work_sub, 
+            i, file_stream, file_stream_done,
+            encode_type,
+            stream_id, stream_type, stream_duration, stream_size, stream_lossless
+        )))
+        threads[-1].start()
+    return streams, threads
+
 if __name__ == '__main__':
     for dir in ( dir_raw, dir_archive, dir_preview, dir_work ):
         if not dir.exists():
@@ -464,6 +486,8 @@ if __name__ == '__main__':
     t_scheduler = threading.Thread(target = scheduler)
     try:
         while True:
+            db = {i:j for i, j in db.items() if i.exists()}
+            db_write()
             scan_dir(dir_raw)
             for i, j in db.items():
                 if j is not None and i not in work:
@@ -489,14 +513,8 @@ if __name__ == '__main__':
                     audios = []
                     audios_size = 0
                     audios_duration = time_zero
-                    file_archive = pathlib.Path(
-                        dir_archive,
-                        i.name
-                    )
-                    file_preview = pathlib.Path(
-                        dir_preview,
-                        i.name
-                    )
+                    file_archive = dir_archive / i.name
+                    file_preview = dir_preview / i.name
                     if file_archive.exists() and file_preview.exists():
                         with lock_db:
                             del db[i]
@@ -505,159 +523,47 @@ if __name__ == '__main__':
                             i.unlink()
                     else:
                         for stream_id, stream in enumerate(j):
-                            stream_type = stream['type']
-                            stream_duration = stream['duration']
-                            stream_size = stream['size']
-                            stream_lossless = stream['lossless']
-                            if stream_type in ('video', 'audio'):
-                                if not file_archive.exists():
-                                    file_stream_archive = pathlib.Path(
-                                        dir_work_sub,
-                                        f'{i.stem}_archive_{stream_id}_{stream_type}.nut'
-                                    )
-                                    file_stream_done_archive = pathlib.Path(
-                                        dir_work_sub,
-                                        f'{i.stem}_archive_{stream_id}_{stream_type}.done'
-                                    )
-                                    streams_archive.append(file_stream_archive)
-                                    if not file_stream_archive.exists() and file_stream_done_archive.exists():
-                                        file_stream_done_archive.unlink()
-                                    if not file_stream_done_archive.exists():
-                                        threads_archive.append(
-                                            threading.Thread(
-                                                target=encoder,
-                                                args=(
-                                                    dir_work_sub, 
-                                                    i,
-                                                    file_stream_archive, #file_out
-                                                    file_stream_done_archive,
-                                                    'archive',
-                                                    stream_id,
-                                                    stream_type,
-                                                    stream_duration,
-                                                    stream_size,
-                                                    stream_lossless
-                                                )
-                                            )
-                                        )
-                                        threads_archive[-1].start()
-                                if not file_preview.exists():
-                                    if stream_type == 'video':
-                                        file_stream_preview = pathlib.Path(
-                                            dir_work_sub,
-                                            f'{i.stem}_preview_{stream_id}_{stream_type}.nut'
-                                        )
-                                        file_stream_done_preview = pathlib.Path(
-                                            dir_work_sub,
-                                            f'{i.stem}_preview_{stream_id}_{stream_type}.done'
-                                        )
-                                        streams_preview.append(file_stream_preview)
-                                        if not file_stream_preview.exists() and file_stream_done_preview.exists():
-                                            file_stream_done_preview.unlink()
-                                        if not file_stream_done_preview.exists():
-                                            threads_preview.append(
-                                                threading.Thread(
-                                                    target=encoder,
-                                                    args=(
-                                                        dir_work_sub, 
-                                                        i,
-                                                        file_stream_preview, #file_out
-                                                        file_stream_done_preview,
-                                                        'preview',
-                                                        stream_id,
-                                                        'video',
-                                                        stream_duration,
-                                                        stream_size,
-                                                        stream_lossless
-                                                    )
-                                                )
-                                            )
-                                            threads_preview[-1].start()
-                                    else:
-                                        audios.append(stream_id)
-                                        audios_size += stream_size
-                                        audios_duration = max(stream_duration, audios_duration)
-                            else:
+                            if stream is None:
                                 if not file_archive.exists():
                                     streams_archive.append(None)
                                 if not file_preview.exists():
                                     streams_preview.append(None)
-
+                            else:
+                                stream_type = stream['type']
+                                stream_duration = stream['duration']
+                                stream_size = stream['size']
+                                stream_lossless = stream['lossless']
+                                if stream_type in ('video', 'audio'):
+                                    if not file_archive.exists():
+                                        streams_archive, threads_archive = thread_adder(dir_work_sub, i, 'archive', stream_id, stream_type, stream_duration, stream_size, stream_lossless, streams_archive, threads_archive)
+                                    if not file_preview.exists():
+                                        if stream_type == 'video':
+                                            streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', stream_id, 'video', stream_duration, stream_size, stream_lossless, streams_preview, threads_preview)
+                                        else:
+                                            audios.append(stream_id)
+                                            audios_size += stream_size
+                                            audios_duration = max(stream_duration, audios_duration)
+                                else:
+                                    if not file_archive.exists():
+                                        streams_archive.append(None)
+                                    if not file_preview.exists():
+                                        streams_preview.append(None)
                         muxers = []
                         if not file_archive.exists():
-                            muxers.append(
-                                threading.Thread(
-                                    target=muxer,
-                                    args=(
-                                        i,
-                                        pathlib.Path(
-                                            dir_work_sub,
-                                            f'{i.stem}_archive.mkv'
-                                        ),
-                                        file_archive,
-                                        streams_archive,
-                                        threads_archive
-                                    )
-                                )
-                            )
+                            muxers.append(threading.Thread(target=muxer, args=(
+                                i, dir_work_sub / f'{i.stem}_archive.mkv', file_archive,
+                                streams_archive, threads_archive
+                            )))
                             muxers[-1].start()
                         if not file_preview.exists():
                             if audios:
-                                file_stream_preview = pathlib.Path(
-                                    dir_work_sub,
-                                    f'{i.stem}_preview_audio.nut'
-                                )
-                                file_stream_done_preview = pathlib.Path(
-                                    dir_work_sub,
-                                    f'{i.stem}_preview_audio.done'
-                                )
-                                streams_preview.append(file_stream_preview)
-                                if not file_stream_preview.exists() and file_stream_done_preview.exists():
-                                    file_stream_done_preview.unlink()
-                                if not file_stream_done_preview.exists():
-                                    threads_preview.append(
-                                        threading.Thread(
-                                            target=encoder,
-                                            args=(
-                                                dir_work_sub, 
-                                                i,
-                                                file_stream_preview, #file_out
-                                                file_stream_done_preview,
-                                                'preview',
-                                                len(audios),
-                                                'audio',
-                                                audios_duration,
-                                                audios_size,
-                                                True
-                                            )
-                                        )
-                                    )
-                                    threads_preview[-1].start()
-                            muxers.append(
-                                threading.Thread(
-                                    target=muxer,
-                                    args=(
-                                        i,
-                                        pathlib.Path(
-                                            dir_work_sub,
-                                            f'{i.stem}_preview.mkv'
-                                        ),
-                                        file_preview,
-                                        streams_preview,
-                                        threads_preview
-                                    )
-                                )
-                            )
+                                streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', len(audios), 'audio', audios_duration, audios_size, True, streams_preview, threads_preview, True)
+                            muxers.append(threading.Thread(target=muxer, args=(
+                                i, dir_work_sub / f'{i.stem}_preview.mkv', file_preview,
+                                streams_preview, threads_preview
+                            )))
                             muxers[-1].start()
-                        thread_cleaner = threading.Thread(
-                            target=cleaner,
-                            args=(
-                                dir_work_sub,
-                                i,
-                                muxers
-                            )
-                        )
-                        thread_cleaner.start()
+                        threading.Thread(target=cleaner, args=(dir_work_sub, i, muxers)).start()
                         work.append(i)
             if not t_scheduler.is_alive():
                 t_scheduler.start()
