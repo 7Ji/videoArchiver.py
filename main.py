@@ -30,6 +30,7 @@ lock_264 = threading.Lock()
 lock_av1 = threading.Lock()
 lock_db = threading.Lock()
 db = {}
+db_last = {}
 work = []
 dirs_work_sub = []
 work_end = False
@@ -219,11 +220,11 @@ def args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_t
 
 def scan_dir(d: pathlib.Path):
     global db
-    db_entry = None
     for i in d.iterdir():
         if i.is_dir():
             scan_dir(i)
-        elif i.is_file():
+        elif i.is_file() and i not in db:
+            db_entry = None
             if i not in db:
                 r = subprocess.run(('ffprobe', '-show_format', '-show_streams', '-select_streams', 'V', '-of', 'json', i), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 if r.returncode == 0:
@@ -243,9 +244,13 @@ def scan_dir(d: pathlib.Path):
                                 streams.append(None)
                         if video:
                             db_entry = streams
-    with lock_db:
-        db[i] = db_entry
+            with lock_db:
+                db[i] = db_entry
     db_write()
+
+def delta_adder(file_check, stream_type, start, size_exist):
+    time_delta, size_delta = get_duration_and_size(file_check, 0, stream_type)
+    return start + time_delta, size_exist + size_delta
 
 def encoder(
     dir_work_sub: pathlib.Path,
@@ -260,9 +265,9 @@ def encoder(
     lossless: bool
 ):  
     if encode_type == 'preview' and stream_type == 'audio':
-        prompt_title = f'{file_raw.name}: E:P S:A:{stream_id}'
+        prompt_title = f'[{file_raw.name}] E:P S:A:{stream_id}'
     else:
-        prompt_title = f'{file_raw.name}: E:{encode_type[:1].capitalize()} S:{stream_id}:{stream_type[:1].capitalize()}'
+        prompt_title = f'[{file_raw.name}] E:{encode_type[:1].capitalize()} S:{stream_id}:{stream_type[:1].capitalize()}'
     print(f'{prompt_title} work started')
     if encode_type == 'preview' and stream_type == 'audio':
         prefix = f'{file_raw.stem}_preview_audio'
@@ -275,51 +280,53 @@ def encoder(
     check_efficiency = encode_type == 'archive'  and not lossless 
     if file_out.exists() and file_out.stat().st_size:
         print(f'{prompt_title} output already exists, potentially broken before, trying to recover it')
-        file_check = file_out
+        time_delta, size_delta = get_duration_and_size(file_out, 0, stream_type)
+        if abs(duration - time_delta) < time_second:
+            print(f'{prompt_title} last transcode successful, no need to transcode')
+            file_done.touch()
+            return
         suffix = 0
+        file_check = dir_work_sub / f'{prefix}_{suffix}.nut'
         while file_check.exists() and file_check.stat().st_size:
-            time_delta, size_delta = get_duration_and_size(file_check, 0, stream_type)
-            if suffix == 0 and abs(duration - time_delta) < time_second:
-                file_done.touch()
-                return
-            start += time_delta
-            size_exist += size_delta
-            concat_list.append(file_check)
-            file_check = dir_work_sub / f'{prefix}_{suffix}.nut'
+            start, size_exist = delta_adder(file_check, stream_type, start, size_exist)
+            concat_list.append(file_check.name)
             suffix += 1
+            file_check = dir_work_sub / f'{prefix}_{suffix}.nut'
         file_recovery = dir_work_sub / f'{prefix}_recovery.nut'
         if stream_type == 'video':
-            p = subprocess.run(('ffprobe', '-show_frames', '-select_streams', 'v:0', '-of', 'json'), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            print(f'{prompt_title} Checking if the interrupt file is usable')
+            p = subprocess.run(('ffprobe', '-show_frames', '-select_streams', 'v:0', '-of', 'json', file_out), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             if p.returncode == 0:
+                print(f'{prompt_title} Analyzing available frames')
                 frames = json.loads(p.stdout)['frames']
                 frame_last = 0
                 for frame_id, frame in enumerate(reversed(frames)):
                     if frame['key_frame']:
-                        frame_last = len(frames) - frame_id - 2
+                        frame_last = len(frames) - frame_id - 1
                         break
                 if frame_last:
                     print(f'{prompt_title} {frame_last} frames seem usable, trying to recovering those')
                     p = subprocess.Popen(('ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', '-vframes', str(frame_last), file_recovery), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                else:
+                    print(f'{prompt_title} No frames usable')
         else:
             p = subprocess.Popen(('ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        if p is subprocess.Popen:
+        if isinstance(p, subprocess.Popen):
             r, t, s = ffmpeg_time_size_poller(p, stream_type)
-            if r == 0:
+            if r:
+                print(f'{prompt_title} Recovery failed')
+            else:
                 shutil.move(file_recovery, file_check)
                 start += t
                 size_exist += s
-                concat_list.append(file_check)
+                concat_list.append(file_check.name)
                 print(f'{prompt_title} {t} of failed transcode recovered')
         file_out.unlink()
         with file_concat_pickle.open('wb') as f:
-            pickle.dump({'list': concat_list, 'start': start, 'size_exist': size_exist}, f)
+            pickle.dump((concat_list, start, size_exist), f)
     if not concat_list and file_concat_pickle.exists():
         with file_concat_pickle.open('rb') as f:
-            dict_concat = pickle.load(f)
-        concat_list = dict_concat['list']
-        start = dict_concat['start']
-        size_exist = dict_concat['size_exist']
-        del dict_concat
+            concat_list, start, size_exist = pickle.load(f)
     if concat_list:
         # We've already transcoded this
         if check_efficiency and size_raw and size_exist > size_raw * 0.9:
@@ -332,7 +339,7 @@ def encoder(
     if stream_type == 'video':
         if stream_type == 'archive':
             global waitpool_264
-            waitpool = waitpool_264
+            waitpool, lock = waitpool_264
             lock = lock_264
         else:
             global waitpool_av1
@@ -362,14 +369,15 @@ def encoder(
         #print(f'{prompt_title} waiting to end')
         if p.wait() == 0:
             if concat_list:
-                concat_list.append(file_out)
+                concat_list.append(file_out.name)
                 concat(prefix, concat_list, file_out, prompt_title, file_done)
             else:
                 print(f'{prompt_title} transcode done')
                 file_done.touch()
             #print(f'{prompt_title} ended {file_done}')
             break
-        print(f'{prompt_title} transcode failed, returncode: {p.wait()}')
+        print(f'{prompt_title} transcode failed, returncode: {p.wait()}, retrying that later')
+        time.sleep(5)
 
 def muxer(
     file_raw: pathlib.Path,
@@ -391,14 +399,14 @@ def muxer(
             inputs += ['-i', stream]
             input_id += 1
             mappers += ['-map', f'{input_id}']
-    print(f'{file_raw.name}: Muxing to {file_out}...')
+    print(f'[{file_raw.name}] Muxing to {file_out}...')
     while subprocess.run((
         'ffmpeg', *inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_cache
     ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-        print(f'{file_raw.name}: Muxing failed, retry that later')
+        print(f'[{file_raw.name}] Muxing failed, retry that later')
         time.sleep(5)
     shutil.move(file_cache, file_out)
-    print(f'{file_raw.name}: Muxing finished')
+    print(f'[{file_raw.name}] Muxing finished')
 
 def cleaner(
     dir_work_sub: pathlib.Path,
@@ -407,25 +415,29 @@ def cleaner(
 ):
     for muxer in muxers:
         muxer.join()
-    print(f'{file_raw.name}: cleaning input and {dir_work_sub}...')
+    print(f'[{file_raw.name}] cleaning input and {dir_work_sub}...')
     shutil.rmtree(dir_work_sub)
     file_raw.unlink()
     with lock_db:
         del db[file_raw]
     db_write()
-    print(f'{file_raw.name}: Done')
+    print(f'[{file_raw.name}] Done')
 
 def db_write():
+    global db_last
     with lock_db:
-        with open(file_db, 'wb') as f:
-            pickle.dump(db, f)
-    print('Database saved')
+        if db != db_last:
+            with open(file_db, 'wb') as f:
+                pickle.dump(db, f)
+            print('[Database] Saved')
+            db_last = db
+
             
 def scheduler():
     global waitpool_264
     global waitpool_av1
     global work_end
-    print('Scheduler started')
+    print('[Scheduler] Started')
     while not work_end:
         cpu_percent = psutil.cpu_percent()
         while cpu_percent < 50 and waitpool_264:
@@ -439,7 +451,7 @@ def scheduler():
             time.sleep(5)
             cpu_percent = psutil.cpu_percent()
         time.sleep(5)
-    print('Scheduler exited')
+    print('[Scheduler] Exited')
 
 if __name__ == '__main__':
     for dir in ( dir_raw, dir_archive, dir_preview, dir_work ):
@@ -448,6 +460,7 @@ if __name__ == '__main__':
     if file_db.exists():
         with open(file_db, 'rb') as f:
             db = pickle.load(f)
+        db_last = db
     t_scheduler = threading.Thread(target = scheduler)
     try:
         while True:
@@ -650,6 +663,6 @@ if __name__ == '__main__':
                 t_scheduler.start()
             time.sleep(5)
     except KeyboardInterrupt:
-        print('Keyboard Interrupt received, exiting safely...')
+        print('[Main] Keyboard Interrupt received, exiting safely...')
         db_write()
         work_end = True
