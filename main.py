@@ -1,4 +1,3 @@
-from email.mime import audio
 import threading
 import subprocess
 import json
@@ -15,6 +14,7 @@ dir_raw = pathlib.Path('raw')
 dir_archive = pathlib.Path('archive')
 dir_preview = pathlib.Path('preview')
 dir_work = pathlib.Path('work')
+file_db = dir_work / 'db.pkl'
 codec_vlo = ('012v', '8bps', 'aasc', 'alias_pix', 'apng', 'avrp', 'avui', 'ayuv', 'bitpacked', 'bmp', 'bmv_video', 'brender_pix', 'cdtoons', 'cllc', 'cscd', 'dpx', 'dxa', 'dxtory', 'ffv1', 'ffvhuff', 'fits', 'flashsv', 'flic', 'fmvc', 'fraps', 'frwu', 'gif', 'huffyuv', 'hymt', 'lagarith', 'ljpeg', 'loco', 'm101', 'magicyuv', 'mscc', 'msp2', 'msrle', 'mszh', 'mwsc', 'pam', 'pbm', 'pcx', 'pfm', 'pgm', 'pgmyuv', 'pgx', 'png', 'ppm', 'psd', 'qdraw', 'qtrle', 'r10k', 'r210', 'rawvideo', 'rscc', 'screenpresso', 'sgi', 'sgirle', 'sheervideo', 'srgc', 'sunrast', 'svg', 'targa', 'targa_y216', 'tiff', 'tscc', 'utvideo', 'v210', 'v210x', 'v308', 'v408', 'v410', 'vble', 'vmnc', 'wcmv', 'wrapped_avframe', 'xbm', 'xpm', 'xwd', 'y41p', 'ylc', 'yuv4', 'zerocodec', 'zlib', 'zmbv')
 codec_alo = ('alac', 'ape', 'atrac3al', 'atrac3pal', 'dst', 'flac', 'mlp', 'mp4als', 'pcm_bluray', 'pcm_dvd', 'pcm_f16le', 'pcm_f24le', 'pcm_f32be', 'pcm_f32le', 'pcm_f64be', 'pcm_f64le', 'pcm_lxf', 'pcm_s16be', 'pcm_s16be_planar', 'pcm_s16le', 'pcm_s16le_planar', 'pcm_s24be', 'pcm_s24daud', 'pcm_s24le', 'pcm_s24le_planar', 'pcm_s32be', 'pcm_s32le', 'pcm_s32le_planar', 'pcm_s64be', 'pcm_s64le', 'pcm_s8', 'pcm_s8_planar', 'pcm_sga', 'pcm_u16be', 'pcm_u16le', 'pcm_u24be', 'pcm_u24le', 'pcm_u32be', 'pcm_u32le', 'pcm_u8', 'ralf', 's302m', 'shorten', 'tak', 'truehd', 'tta', 'wmalossless')
 reg_complete = {
@@ -34,10 +34,57 @@ db = {}
 work = []
 dirs_work_sub = []
 
+class progressBar:
+    def __init__(self, title = 'Status'):
+        self.title = title
+        self.title_length = len(title)
+        self.check_terminal()
+        self.percent = 0
+        self.display()
 
-def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int=None):
+    def check_terminal(self):
+        width = shutil.get_terminal_size()[0]
+        try:
+            if width == self.width:
+                return 
+        except AttributeError:
+            pass
+        self.width = width
+        self.bar_length = width - self.title_length - 5
+        if self.bar_length <= 0:
+            raise ValueError('Terminal too small')
+
+    def display(self):
+        bar_complete = int(self.percent * self.bar_length)
+        bar_incomplete = self.bar_length - bar_complete
+        print(''.join([
+            self.title,
+            ' ',
+            ''.join(['█' for i in range(bar_complete)]),
+            ''.join(['-' for i in range(bar_incomplete)]),
+            f'{int(self.percent * 100)}%'.rjust(4)
+        ]),
+            end='\r'
+        )
+
+    def set(self, percent):
+        self.check_terminal()
+        self.percent = max(min(percent, 1), 0)
+        self.display()
+        if self.percent == 1:
+            print()
+
+    def add(self, delta_percent):
+        self.check_terminal()
+        self.percent = max(min(self.percent + delta_percent, 1), 0)
+        self.display()
+        if self.percent == 1:
+            print()
+
+def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int=None, progress_bar:progressBar=None, target_time:datetime.timedelta=None):
     if size_allow is not None:
         inefficient = False
+    check_time = size_allow is None or (size_allow is not None and progress_bar is not None)
     reader = p.stderr
     while p.poll() is None:
         chars = []
@@ -49,11 +96,18 @@ def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int
                 chars.append(char)
         if chars:
             line = ''.join([char.decode('utf-8') for char in chars])
-            if size_allow is None:
+            if check_time:
                 m = reg_time.search(line)
                 if m:
                     t = m[1]
-            else:
+                    if progress_bar is not None:
+                        t = datetime.timedelta(
+                            hours = int(t[:2]),
+                            minutes = int(t[3:5]),
+                            seconds = float(t[6:])
+                        )
+                        progress_bar.set(t/target_time)
+            if size_allow is not None:
                 m = reg_running.search(line)
                 if m and int(m[1]) >= size_allow:
                     inefficient = True
@@ -68,15 +122,20 @@ def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int
         s = int(m[1])
         if size_allow is not None and s >= size_allow:
             inefficient = True
+    if progress_bar is not None:
+        progress_bar.set(1)
     if size_allow is None:
-        return \
-            p.wait(), \
-            datetime.timedelta(
-                hours = int(t[:2]),
-                minutes = int(t[3:5]),
-                seconds = float(t[6:])
-            ), \
-            s
+        if progress_bar is None:
+            return \
+                p.wait(), \
+                datetime.timedelta(
+                    hours = int(t[:2]),
+                    minutes = int(t[3:5]),
+                    seconds = float(t[6:])
+                ), \
+                s
+        else:
+            return p.wait(), t, s
     else:
         return inefficient
 
@@ -84,7 +143,7 @@ def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int
 
 def get_duration_and_size(media: pathlib.Path, stream_id: int, stream_type: str):
     try:
-        p = subprocess.Popen(('ffmpeg', '-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        p = subprocess.Popen(('ffmpeg', '-hwaccel', 'auto', '-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         r, t, s = ffmpeg_time_size_poller(p, stream_type)
     except KeyboardInterrupt:
         p.kill()
@@ -95,50 +154,59 @@ def scan_dir(d: pathlib.Path):
     for i in d.iterdir():
         if i.is_dir():
             scan_dir(i)
-        elif i.is_file() and i not in db:
-            r = subprocess.run(('ffprobe', '-show_format', '-show_streams', '-select_streams', 'V', '-of', 'json', i), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            if r.returncode:
-                db[i] = None
-            else:
-                j = json.loads(r.stdout)
-                j_format =  j['format']['format_name']
-                if j_format.endswith('_pipe') or j_format in ('image2', 'tty'):
-                    db[i] = None
+        elif i.is_file():
+            if i not in db:
+                r = subprocess.run(('ffprobe', '-show_format', '-show_streams', '-select_streams', 'V', '-of', 'json', i), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                if r.returncode:
+                    with lock_db:
+                        db[i] = None
                 else:
-                    if j['streams']:
-                        streams = []
-                        video = False
-                        for id, s in enumerate(
-                            json.loads(subprocess.run(('ffprobe', '-show_format', '-show_streams', '-of', 'json', i), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout)['streams']
-                        ):
-                            if s['codec_type'] == 'video':
-                                if not video and s['codec_type'] == 'video':
-                                    video = True
-                                duration, size = get_duration_and_size(i, id, 'video')
-                                streams.append({
-                                    'type': 'video',
-                                    'lossless': s['codec_name'] in codec_vlo,
-                                    'duration': duration,
-                                    'size': size
-                                })
-                            elif s['codec_type'] == 'audio':
-                                duration, size = get_duration_and_size(i, id, 'audio')
-                                streams.append({
-                                    'type': 'audio',
-                                    'lossless': s['codec_name'] in codec_alo,
-                                    'duration': duration,
-                                    'size': size
-                                })
-                            else:
-                                streams.append(None)
-                        if video:
-                            db[i] = streams
-                        else:
+                    j = json.loads(r.stdout)
+                    j_format =  j['format']['format_name']
+                    if j_format.endswith('_pipe') or j_format in ('image2', 'tty'):
+                        with lock_db:
                             db[i] = None
                     else:
-                        db[i] = None
+                        if j['streams']:
+                            streams = []
+                            video = False
+                            for id, s in enumerate(
+                                json.loads(subprocess.run(('ffprobe', '-show_format', '-show_streams', '-of', 'json', i), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout)['streams']
+                            ):
+                                if s['codec_type'] == 'video':
+                                    if not video and s['codec_type'] == 'video':
+                                        video = True
+                                    duration, size = get_duration_and_size(i, id, 'video')
+                                    streams.append({
+                                        'type': 'video',
+                                        'lossless': s['codec_name'] in codec_vlo,
+                                        'duration': duration,
+                                        'size': size
+                                    })
+                                elif s['codec_type'] == 'audio':
+                                    duration, size = get_duration_and_size(i, id, 'audio')
+                                    streams.append({
+                                        'type': 'audio',
+                                        'lossless': s['codec_name'] in codec_alo,
+                                        'duration': duration,
+                                        'size': size
+                                    })
+                                else:
+                                    streams.append(None)
+                            if video:
+                                with lock_db:
+                                    db[i] = streams
+                            else:
+                                with lock_db:
+                                    db[i] = None
+                        else:
+                            with lock_db:
+                                db[i] = None
         else:
-            db[i] = None
+            with lock_db:
+                db[i] = None
+    db_write()
+
 def encoder(
     dir_work_sub: pathlib.Path,
     file_raw: pathlib.Path, 
@@ -153,12 +221,12 @@ def encoder(
 ):  
     if encode_type == 'preview' and stream_type == 'audio':
         if stream_id == 1:
-            debug_title = f'{file_raw}: Stream ? (audio) preview'
+            debug_title = f'{file_raw.name}: Stream ? (audio) preview'
         else:
-            debug_title = f'{file_raw}: Amix ({stream_id} audios) preview'
+            debug_title = f'{file_raw.name}: Amix ({stream_id} audios) preview'
     else:
-        debug_title = f'{file_raw}: Stream {stream_id} ({stream_type}) {encode_type}'
-    print(f'{debug_title} encoding started')
+        debug_title = f'{file_raw.name}: Stream {stream_id} ({stream_type}) {encode_type}'
+    #print(f'{debug_title} encoding routine started')
     if encode_type == 'preview' and stream_type == 'audio':
         prefix = f'{file_raw.stem}_preview_audio'
     else:
@@ -173,7 +241,7 @@ def encoder(
     check_efficiency = encode_type == 'archive'  and not lossless 
     try:
         if file_out.exists() and file_out.stat().st_size:
-            print(f'{debug_title} potentially broken before')
+            #print(f'{debug_title} potentially broken before')
             file_check = file_out
             suffix = 0
             while file_check.exists() and file_check.stat().st_size:
@@ -309,9 +377,10 @@ def encoder(
                 p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             else:
                 p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            print(f'{debug_title} started')
-            if check_efficiency and ffmpeg_time_size_poller(p, stream_type, size_allow):
-                print(f'{debug_title} inefficient')
+            progress_bar = progressBar(debug_title)
+            #print(f'{debug_title} started')
+            if check_efficiency and ffmpeg_time_size_poller(p, stream_type, size_allow, progress_bar, duration-start):
+                #print(f'{debug_title} inefficient')
                 file_copy = pathlib.Path(
                     dir_work_sub,
                     f'{prefix}_copy.nut'
@@ -322,12 +391,12 @@ def encoder(
                 shutil.move(file_copy, file_out)
                 file_done.touch()
                 return 
-            print(f'{debug_title} waiting to end')
+            #print(f'{debug_title} waiting to end')
             if p.wait() == 0:
                 file_done.touch()
-                print(f'{debug_title} ended {file_done}')
+                #print(f'{debug_title} ended {file_done}')
                 break
-            print(f'{debug_title} encoding not good')
+            #print(f'{debug_title} encoding not good')
     except KeyboardInterrupt:
         try:
             p.kill()
@@ -370,6 +439,12 @@ def cleaner(
     file_raw.unlink()
     with lock_db:
         del db[file_raw]
+    db_write()
+
+def db_write():
+    with lock_db:
+        with open(file_db, 'wb') as f:
+            pickle.dump(db, f)
             
 def scheduler():
     global waitpool_264
@@ -395,11 +470,17 @@ def scheduler():
             time.sleep(60)
 
 if __name__ == '__main__':
+    for dir in ( dir_raw, dir_archive, dir_preview, dir_work ):
+        if not dir.exists():
+            dir.mkdir()
+    if file_db.exists():
+        with open(file_db, 'rb') as f:
+            db = pickle.load(f)
     t_scheduler = threading.Thread(target = scheduler)
-    while True:
-        work_count = len(work)
-        scan_dir(dir_raw)
-        with lock_db:
+    try:
+        while True:
+            work_count = len(work)
+            scan_dir(dir_raw)
             for i, j in db.items():
                 if j is not None and i not in work:
                     dir_work_sub = pathlib.Path(
@@ -435,6 +516,7 @@ if __name__ == '__main__':
                     if file_archive.exists() and file_preview.exists():
                         with lock_db:
                             del db[i]
+                        db_write()
                         if i.exists():
                             i.unlink()
                     else:
@@ -593,9 +675,12 @@ if __name__ == '__main__':
                         )
                         thread_cleaner.start()
                         work.append(i)
-        if not t_scheduler.is_alive():
-            t_scheduler.start()
-        if len(work) != work_count:
-            time.sleep(60)
-        else:
-            time.sleep(600)
+            if not t_scheduler.is_alive():
+                t_scheduler.start()
+            if len(work) != work_count:
+                time.sleep(60)
+            else:
+                time.sleep(600)
+    except KeyboardInterrupt:
+        with lock_db:
+            db_write()
