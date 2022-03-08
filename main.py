@@ -143,7 +143,7 @@ def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int
 
 def get_duration_and_size(media: pathlib.Path, stream_id: int, stream_type: str):
     try:
-        p = subprocess.Popen(('ffmpeg', '-hwaccel', 'auto', '-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        p = subprocess.Popen(('ffmpeg', '-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         r, t, s = ffmpeg_time_size_poller(p, stream_type)
     except KeyboardInterrupt:
         p.kill()
@@ -226,7 +226,7 @@ def encoder(
             debug_title = f'{file_raw.name}: Amix ({stream_id} audios) preview'
     else:
         debug_title = f'{file_raw.name}: Stream {stream_id} ({stream_type}) {encode_type}'
-    #print(f'{debug_title} encoding routine started')
+    print(f'{debug_title} work started')
     if encode_type == 'preview' and stream_type == 'audio':
         prefix = f'{file_raw.stem}_preview_audio'
     else:
@@ -239,87 +239,174 @@ def encoder(
     size_exist = 0
     concat_list = []
     check_efficiency = encode_type == 'archive'  and not lossless 
-    try:
-        if file_out.exists() and file_out.stat().st_size:
-            #print(f'{debug_title} potentially broken before')
-            file_check = file_out
-            suffix = 0
-            while file_check.exists() and file_check.stat().st_size:
-                time_delta, size_delta = get_duration_and_size(file_check, 0, stream_type)
-                # Special case: suffix = 0, the first iteration, here, file_check = file_out
-                if suffix == 0 and abs(duration - time_delta) < time_second:
-                    # First file, that is, file_out, its length is already OK, consider it finished
-                    file_done.touch()
-                    return
-                start += time_delta
-                size_exist += size_delta
-                concat_list.append(file_check)
-                file_check = pathlib.Path(
-                    dir_work_sub,
-                    f'{prefix}_{suffix}.nut'
-                )
-                suffix += 1
-            file_recovery = pathlib.Path(
-                dir_work_sub,
-                f'{prefix}_recovery.nut'
-            )
-            # Recovery
-            if stream_type == 'video':
-                p = subprocess.run((
-                    'ffprobe', '-show_frames', '-select_streams', 'v:0', '-of', 'json'
-                ), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                if p.returncode == 0:
-                    frames = json.loads(p.stdout)['frames']
-                    frame_last = 0
-                    for frame_id, frame in enumerate(reversed(frames)):
-                        if frame['key_frame']:
-                            frame_last = len(frames) - frame_id - 2
-                            break
-                    if frame_last:
-                        p = subprocess.Popen((
-                                'ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', '-vframes', str(frame_last), file_recovery
-                            ), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            else:
-                p = subprocess.Popen((
-                    'ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery
-                ), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            if p is subprocess.Popen:
-                r, t, s = ffmpeg_time_size_poller(p, stream_type)
-                if r == 0:
-                    shutil.move(file_recovery, file_check)
-                    start += t
-                    size_exist += s
-                    concat_list.append(file_check)
-            file_out.unlink()
-            with file_concat_pickle.open('wb') as f:
-                pickle.dump({
-                    'list': concat_list,
-                    'start': start,
-                    'size_exist': size_exist
-                }, f)
-        if not concat_list and file_concat_pickle.exists():
-            # No recovery this time (hence, concat_list is empty), but concat_list from last time is found, we use that.
-            with file_concat_pickle.open('rb') as f:
-                dict_concat = pickle.load(f)
-            concat_list = dict_concat['list']
-            start = dict_concat['start']
-            size_exist = dict_concat['size_exist']
-            del dict_concat
-        if concat_list:
-            # We've already transcoded this
-            if check_efficiency and size_raw and size_exist > size_raw * 0.9:
-                file_copy = pathlib.Path(
-                    dir_work_sub,
-                    f'{prefix}_copy.nut'
-                )
-                subprocess.run((
-                    'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy
-                ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                shutil.move(file_copy, file_out)
+    if file_out.exists() and file_out.stat().st_size:
+        print(f'{debug_title} output already exists, potentially broken before')
+        file_check = file_out
+        suffix = 0
+        while file_check.exists() and file_check.stat().st_size:
+            time_delta, size_delta = get_duration_and_size(file_check, 0, stream_type)
+            # Special case: suffix = 0, the first iteration, here, file_check = file_out
+            if suffix == 0 and abs(duration - time_delta) < time_second:
+                # First file, that is, file_out, its length is already OK, consider it finished
                 file_done.touch()
-                return 
-            if start >= duration or  duration - start < time_second:
-                # Consider it finished
+                return
+            start += time_delta
+            size_exist += size_delta
+            concat_list.append(file_check)
+            file_check = pathlib.Path(
+                dir_work_sub,
+                f'{prefix}_{suffix}.nut'
+            )
+            suffix += 1
+        file_recovery = pathlib.Path(
+            dir_work_sub,
+            f'{prefix}_recovery.nut'
+        )
+        # Recovery
+        if stream_type == 'video':
+            p = subprocess.run((
+                'ffprobe', '-show_frames', '-select_streams', 'v:0', '-of', 'json'
+            ), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            if p.returncode == 0:
+                frames = json.loads(p.stdout)['frames']
+                frame_last = 0
+                for frame_id, frame in enumerate(reversed(frames)):
+                    if frame['key_frame']:
+                        frame_last = len(frames) - frame_id - 2
+                        break
+                if frame_last:
+                    print(f'{debug_title} {frame_last} frames seem usable, trying to recovering those')
+                    p = subprocess.Popen((
+                            'ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', '-vframes', str(frame_last), file_recovery
+                        ), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        else:
+            p = subprocess.Popen((
+                'ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery
+            ), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        if p is subprocess.Popen:
+            r, t, s = ffmpeg_time_size_poller(p, stream_type)
+            if r == 0:
+                shutil.move(file_recovery, file_check)
+                start += t
+                size_exist += s
+                concat_list.append(file_check)
+            print(f'{debug_title} {t} of failed transcode recovered')
+        file_out.unlink()
+        with file_concat_pickle.open('wb') as f:
+            pickle.dump({
+                'list': concat_list,
+                'start': start,
+                'size_exist': size_exist
+            }, f)
+    if not concat_list and file_concat_pickle.exists():
+        # No recovery this time (hence, concat_list is empty), but concat_list from last time is found, we use that.
+        with file_concat_pickle.open('rb') as f:
+            dict_concat = pickle.load(f)
+        concat_list = dict_concat['list']
+        start = dict_concat['start']
+        size_exist = dict_concat['size_exist']
+        del dict_concat
+    if concat_list:
+        # We've already transcoded this
+        if check_efficiency and size_raw and size_exist > size_raw * 0.9:
+            print(f'{debug_title} transcode inefficient, copying raw stream instead')
+            file_copy = pathlib.Path(
+                dir_work_sub,
+                f'{prefix}_copy.nut'
+            )
+            subprocess.run((
+                'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy
+            ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            shutil.move(file_copy, file_out)
+            print(f'{debug_title} stream copy done')
+            file_done.touch()
+            return 
+        if start >= duration or  duration - start < time_second:
+            print(f'{debug_title} seems already finished, concating all failed parts')
+            # Consider it finished
+            file_list = pathlib.Path(
+                dir_work_sub,
+                f'{prefix}.list'
+            )
+            file_concat = pathlib.Path(
+                dir_work_sub,
+                f'{prefix}_concat.nut'
+            )
+            with file_list.open('w') as f:
+                for file in concat_list:
+                    f.write(f'file {file}\n')
+            while subprocess.run((
+                'ffmpeg', '-f', 'concat', '-safe', '0', '-i', file_list, '-c', 'copy', '-map', '0', '-y', file_concat
+            ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+                time.sleep(60)
+            shutil.move(file_concat, file_out)
+            print(f'{debug_title} concating done')
+            file_done.touch()
+            return
+    if stream_type == 'video':
+        if stream_type == 'archive':
+            global waitpool_264
+        else:
+            global waitpool_av1
+    # Real encoding happenes below
+    if check_efficiency:
+        size_allow = size_raw * 0.9 - size_exist
+    args_in = ('ffmpeg', '-hwaccel', 'auto', '-ss', str(start), '-i', file_raw)
+    args_map = ('-map', f'0:{stream_id}')
+    args_out = ('-y', file_out)
+    if stream_type == 'video':
+        if encode_type == 'archive':
+            args = (*args_in,  '-c:v', 'libx264', '-crf', '18', '-preset', 'veryslow', *args_map, *args_out)
+        else:
+            args = (*args_in,  '-c:v', 'libaom-av1', '-crf', '63', '-cpu-used', '2', *args_map, *args_out)
+    else: # Audio
+        if encode_type == 'archive':
+            args = (*args_in, '-c:a', 'libfdk_aac', '-vbr', '5', *args_map, *args_out)
+        else:
+            if stream_id == 1:
+                args = (*args_in, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', *args_out)
+            else:
+                args = (*args_in, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-filter_complex', f'amix=inputs={stream_id}:duration=longest', *args_out)
+    while True:
+        if stream_type == 'video':
+            print(f'{debug_title} waiting for CPU resources')
+            waiter = threading.Event()
+            if encode_type == 'archive':
+                with lock_264:
+                    waitpool_264.append(waiter)
+                waiter.wait()
+            else:
+                with lock_av1:
+                    waitpool_av1.append(waiter)
+                waiter.wait()
+        print(f'{debug_title} transcode started')
+        if check_efficiency:
+            p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        else:
+            p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        progress_bar = progressBar(debug_title)
+        #print(f'{debug_title} started')
+        target_time=duration-start
+        if check_efficiency and ffmpeg_time_size_poller(p, stream_type, size_allow, progress_bar, target_time):
+            #print(f'{debug_title} inefficient')
+            print(f'{debug_title} transcode inefficient, copying raw stream instead')
+            file_copy = pathlib.Path(
+                dir_work_sub,
+                f'{prefix}_copy.nut'
+            )
+            subprocess.run((
+                'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy
+            ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            shutil.move(file_copy, file_out)
+            print(f'{debug_title} stream copy done')
+            file_done.touch()
+            return 
+        else:
+            ffmpeg_time_size_poller(p, stream_type, progress_bar=progress_bar, target_time=target_time)
+        #print(f'{debug_title} waiting to end')
+        if p.wait() == 0:
+            if concat_list:
+                print(f'{debug_title} transcode done, concating all parts')
                 file_list = pathlib.Path(
                     dir_work_sub,
                     f'{prefix}.list'
@@ -331,77 +418,19 @@ def encoder(
                 with file_list.open('w') as f:
                     for file in concat_list:
                         f.write(f'file {file}\n')
+                    f.write(f'file {file_out}\n')
                 while subprocess.run((
                     'ffmpeg', '-f', 'concat', '-safe', '0', '-i', file_list, '-c', 'copy', '-map', '0', '-y', file_concat
                 ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
                     time.sleep(60)
                 shutil.move(file_concat, file_out)
-                file_done.touch()
-                return
-        if stream_type == 'video':
-            if stream_type == 'archive':
-                global waitpool_264
+                print(f'{debug_title} concating done')
             else:
-                global waitpool_av1
-        # Real encoding happenes below
-        if check_efficiency:
-            size_allow = size_raw * 0.9 - size_exist
-        args_in = ('ffmpeg', '-ss', str(start), '-i', file_raw)
-        args_map = ('-map', f'0:{stream_id}')
-        args_out = ('-y', file_out)
-        if stream_type == 'video':
-            if encode_type == 'archive':
-                args = (*args_in,  '-c:v', 'libx264', '-crf', '18', '-preset', 'veryslow', *args_map, *args_out)
-            else:
-                args = (*args_in,  '-c:v', 'libaom-av1', '-crf', '63', '-cpu-used', '2', *args_map, *args_out)
-        else: # Audio
-            if encode_type == 'archive':
-                args = (*args_in, '-c:a', 'libfdk_aac', '-vbr', '5', *args_map, *args_out)
-            else:
-                if stream_id == 1:
-                    args = (*args_in, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', *args_out)
-                else:
-                    args = (*args_in, '-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-filter_complex', f'amix=inputs={stream_id}:duration=longest', *args_out)
-        while True:
-            if stream_type == 'video':
-                waiter = threading.Event()
-                if encode_type == 'archive':
-                    with lock_264:
-                        waitpool_264.append(waiter)
-                    waiter.wait()
-                else:
-                    with lock_av1:
-                        waitpool_av1.append(waiter)
-                    waiter.wait()
-            if check_efficiency:
-                p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            else:
-                p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            progress_bar = progressBar(debug_title)
-            #print(f'{debug_title} started')
-            if check_efficiency and ffmpeg_time_size_poller(p, stream_type, size_allow, progress_bar, duration-start):
-                #print(f'{debug_title} inefficient')
-                file_copy = pathlib.Path(
-                    dir_work_sub,
-                    f'{prefix}_copy.nut'
-                )
-                subprocess.run((
-                    'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy
-                ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                shutil.move(file_copy, file_out)
-                file_done.touch()
-                return 
-            #print(f'{debug_title} waiting to end')
-            if p.wait() == 0:
-                file_done.touch()
-                #print(f'{debug_title} ended {file_done}')
-                break
-            #print(f'{debug_title} encoding not good')
-    except KeyboardInterrupt:
-        try:
-            p.kill()
-        except NameError:  # Special case: KeyboardInterrupt before p is defined
-            pass
+                print(f'{debug_title} transcode done')
+            file_done.touch()
+            #print(f'{debug_title} ended {file_done}')
+            break
+        print(f'{debug_title} transcode failed, returncode: {p.wait()}')
 def muxer(
     file_raw: pathlib.Path,
     file_cache: pathlib.Path,
@@ -422,11 +451,14 @@ def muxer(
             inputs += ['-i', stream]
             input_id += 1
             mappers += ['-map', f'{input_id}']
+    print(f'Muxing {file_out}...')
     while subprocess.run((
         'ffmpeg', *inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_cache
     ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        print(f'Muxing of {file_out} failed, remuxing...')
         time.sleep(60)
     shutil.move(file_cache, file_out)
+    print(f'Muxing of {file_out} done')
 
 def cleaner(
     dir_work_sub: pathlib.Path,
@@ -435,11 +467,13 @@ def cleaner(
 ):
     for muxer in muxers:
         muxer.join()
+    print(f'Cleaning {file_raw}... {dir_work_sub} and all its contents will be deleted')
     shutil.rmtree(dir_work_sub)
     file_raw.unlink()
     with lock_db:
         del db[file_raw]
     db_write()
+    print(f'{file_raw.name} done')
 
 def db_write():
     with lock_db:
@@ -465,9 +499,9 @@ def scheduler():
             time.sleep(5)
             cpu_percent = psutil.cpu_percent()
         if wake:
-            time.sleep(10)
+            time.sleep(5)
         else:
-            time.sleep(60)
+            time.sleep(30)
 
 if __name__ == '__main__':
     for dir in ( dir_raw, dir_archive, dir_preview, dir_work ):
@@ -678,9 +712,9 @@ if __name__ == '__main__':
             if not t_scheduler.is_alive():
                 t_scheduler.start()
             if len(work) != work_count:
-                time.sleep(60)
+                time.sleep(10)
             else:
-                time.sleep(600)
+                time.sleep(60)
     except KeyboardInterrupt:
         with lock_db:
             db_write()
