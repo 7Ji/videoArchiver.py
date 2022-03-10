@@ -8,10 +8,12 @@ import shutil
 import psutil
 import time
 import pickle
+import math
 
 dir_raw = pathlib.Path('raw')
 dir_archive = pathlib.Path('archive')
 dir_preview = pathlib.Path('preview')
+dir_screenshot = pathlib.Path('screenshot')
 dir_work = pathlib.Path('work')
 file_db = dir_work / 'db.pkl'
 codec_vlo = ('012v', '8bps', 'aasc', 'alias_pix', 'apng', 'avrp', 'avui', 'ayuv', 'bitpacked', 'bmp', 'bmv_video', 'brender_pix', 'cdtoons', 'cllc', 'cscd', 'dpx', 'dxa', 'dxtory', 'ffv1', 'ffvhuff', 'fits', 'flashsv', 'flic', 'fmvc', 'fraps', 'frwu', 'gif', 'huffyuv', 'hymt', 'lagarith', 'ljpeg', 'loco', 'm101', 'magicyuv', 'mscc', 'msp2', 'msrle', 'mszh', 'mwsc', 'pam', 'pbm', 'pcx', 'pfm', 'pgm', 'pgmyuv', 'pgx', 'png', 'ppm', 'psd', 'qdraw', 'qtrle', 'r10k', 'r210', 'rawvideo', 'rscc', 'screenpresso', 'sgi', 'sgirle', 'sheervideo', 'srgc', 'sunrast', 'svg', 'targa', 'targa_y216', 'tiff', 'tscc', 'utvideo', 'v210', 'v210x', 'v308', 'v408', 'v410', 'vble', 'vmnc', 'wcmv', 'wrapped_avframe', 'xbm', 'xpm', 'xwd', 'y41p', 'ylc', 'yuv4', 'zerocodec', 'zlib', 'zmbv')
@@ -35,12 +37,23 @@ work = []
 dirs_work_sub = []
 work_end = False
 
+def str_timedelta(timedelta: datetime.timedelta):
+    time = int(timedelta.total_seconds())
+    hours, remainder = divmod(time, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+
 class progressBar:
     def __init__(self, title = 'Status'):
         self.title = title
         self.title_length = len(title)
         self.check_terminal()
         self.percent = 0
+        self.time_start = datetime.datetime.today()
+        self.time_spent = time_zero
+        self.time_estimate = None
+        self.time_spent_str = '00:00:00'
+        self.time_estimate_str = '--------'
         self.display()
 
     def check_terminal(self):
@@ -51,7 +64,7 @@ class progressBar:
         except AttributeError:
             pass
         self.width = width
-        self.bar_length = width - self.title_length - 5
+        self.bar_length = width - self.title_length - 28
         if self.bar_length <= 0:
             raise ValueError('Terminal too small')
 
@@ -64,23 +77,40 @@ class progressBar:
                 ' ',
                 ''.join(['█' for i in range(bar_complete)]),
                 ''.join(['-' for i in range(bar_incomplete)]),
+                ' S:',
+                self.time_spent_str,
+                ' R:',
+                self.time_estimate_str,
+                ' '
                 f'{int(self.percent * 100)}%'.rjust(4)
             ]),
                 end='\r'
             )
             self.bar_complete = bar_complete
 
-    def set(self, percent):
+    def update_timer(self):
+        time_now = datetime.datetime.today()
+        time_spent = time_now - self.time_start
+        if time_spent - self.time_spent > time_second and self.percent > 0:
+            self.time_spent = time_spent
+            self.time_spent_str = str_timedelta(time_spent)
+            self.time_estimate = time_spent / self.percent - time_spent
+            self.time_estimate_str = str_timedelta(self.time_estimate)
+
+    def pre_display(self):
         self.check_terminal()
-        self.percent = max(min(percent, 1), 0)
+        self.update_timer()
         self.display()
+
+    def set(self, percent):
+        self.percent = max(min(percent, 1), 0)
+        self.pre_display()
         # if self.percent == 1:
         #     print()
 
     def add(self, delta_percent):
-        self.check_terminal()
         self.percent = max(min(self.percent + delta_percent, 1), 0)
-        self.display()
+        self.pre_display()
         # if self.percent == 1:
         #     print()
 
@@ -152,18 +182,26 @@ def get_duration_and_size(media: pathlib.Path, stream_id: int, stream_type: str)
         p.kill()
     return t, s
 
-def stream_info(file_raw, stream_id, stream_type, codec_name):
+def stream_info(file_raw, stream_id, stream_type, stream):
     duration, size = get_duration_and_size(file_raw, stream_id, stream_type)
     if stream_type == 'video':
-        lossless = codec_name in codec_vlo
+        lossless = stream['codec_name'] in codec_vlo
+        return {
+            'type': stream_type,
+            'lossless': lossless,
+            'width': stream['width'],
+            'height': stream['height'],
+            'duration': duration,
+            'size': size
+        }
     else:
-        lossless = codec_name in codec_alo
-    return {
-        'type': stream_type,
-        'lossless': lossless,
-        'duration': duration,
-        'size': size
-    }
+        lossless = stream['codec_name'] in codec_alo
+        return {
+            'type': stream_type,
+            'lossless': lossless,
+            'duration': duration,
+            'size': size
+        }
 
 def stream_copy(dir_work_sub, prefix, file_raw, stream_id, file_out, prompt_title, file_done):
     print(f'{prompt_title} transcode inefficient, copying raw stream instead')
@@ -202,7 +240,13 @@ def concat(prefix, concat_list, file_out, prompt_title, file_done):
     print(f'{prompt_title} concating done')
     file_done.touch()
 
-def args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_type):
+def resolution_shrinker(width, height):
+    while width > 1000 and height > 1000:
+        width //= 2
+        height //= 2
+    return width, height
+
+def args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_type, stream_width, stream_height):
     args_in = ('ffmpeg', '-hwaccel', 'auto', '-ss', str(start), '-i', file_raw)
     args_map = ('-map', f'0:{stream_id}')
     args_out = ('-y', file_out)
@@ -210,7 +254,11 @@ def args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_t
         if encode_type == 'archive':
             return (*args_in,  '-c:v', 'libx264', '-crf', '18', '-preset', 'veryslow', *args_map, *args_out)
         else:
-            return (*args_in,  '-c:v', 'libaom-av1', '-crf', '63', '-cpu-used', '6', *args_map, *args_out)
+            if stream_width > 1000 and stream_height > 1000:
+                stream_width, stream_height = resolution_shrinker(stream_width, stream_height)
+                return (*args_in,  '-c:v', 'libsvtav1', '-qp', '63', '-preset', '8', *args_map, '-filter:v', f'scale={stream_width}x{stream_height}', *args_out)
+            else:
+                return (*args_in,  '-c:v', 'libsvtav1', '-qp', '63', '-preset', '8', *args_map, *args_out)
     else: # Audio
         if encode_type == 'archive':
             return (*args_in, '-c:a', 'libfdk_aac', '-vbr', '5', *args_map, *args_out)
@@ -229,7 +277,6 @@ def wait_write(file_raw:pathlib.Path):
         if size_new == size_old:
             if hint:
                 print(f'[Scanner] {file_raw} closed writing, continue scanning')
-            print('wtf')
             return
         if not hint:
             print(f'[Scanner] Jammed, Waiting for {file_raw} to be closed writing')
@@ -258,7 +305,7 @@ def scan_dir(d: pathlib.Path):
                             if s['codec_type'] in ('video', 'audio'):
                                 if s['codec_type'] == 'video':
                                     video = True
-                                streams.append(stream_info(i, stream_id, s['codec_type'], s['codec_name']))
+                                streams.append(stream_info(i, stream_id, s['codec_type'], s))
                             else:
                                 streams.append(None)
                         if video:
@@ -275,7 +322,8 @@ def encoder(
     dir_work_sub: pathlib.Path,
     file_raw: pathlib.Path, file_out: pathlib.Path, file_done: pathlib.Path,
     encode_type: str, 
-    stream_id: int, stream_type: str, duration: datetime.timedelta, size_raw: int, lossless: bool
+    stream_id: int, stream_type: str, duration: datetime.timedelta, size_raw: int, lossless: bool,
+    stream_width: int, stream_height:int
 ):  
     if encode_type == 'preview' and stream_type == 'audio':
         prompt_title = f'[{file_raw.name}] E:P S:A:{stream_id}'
@@ -361,7 +409,7 @@ def encoder(
     # Real encoding happenes below
     if check_efficiency:
         size_allow = size_raw * 0.9 - size_exist
-    args = args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_type)
+    args = args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_type, stream_width, stream_height)
     target_time = duration - start
     while True:
         if stream_type == 'video':
@@ -421,13 +469,70 @@ def muxer(
     shutil.move(file_cache, file_out)
     print(f'[{file_raw.name}] Muxing finished')
 
+def clamp(n, minimum, maximum):
+    return min(max(n, minimum), maximum)
+
+def screenshooter(
+    file_raw: pathlib.Path,
+    file_cache: pathlib.Path,
+    file_out: pathlib.Path,
+    stream_id: int,
+    duration: datetime.timedelta,
+    stream_width: int,
+    stream_height: int
+):
+    length = clamp(int(math.log(duration.total_seconds() + 1)), 1, 10)
+    if length == 1:
+        args = ('ffmpeg', '-hwaccel', 'auto', '-i', file_raw, '-map', f'0:{stream_id}', '-vsync', 'passthrough', '-frames:v', '1', '-y', file_cache)
+        print(f'[{file_raw.name}] Taking screenshot, single frame')
+    else:
+        width = stream_width * length
+        height = stream_height * length
+        if width > 65535 or length > 65535:
+            while width > 65535 or length > 65535:
+                width //= 2
+                length //= 2
+            arg_scale = f',scale={width}x{height}'
+        else:
+            arg_scale = ''
+        tiles = length**2
+        time_delta = duration / tiles
+        if duration < datetime.timedelta(seconds=tiles*5):
+            args = (
+                'ffmpeg', '-hwaccel', 'auto', '-i', file_raw, '-map', f'0:{stream_id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta.total_seconds()}),tile={length}x{length}{arg_scale}', '-vsync', 'passthrough', '-frames:v', '1', '-y', file_cache
+            )
+        else:
+            time_start = time_zero
+            args_input = []
+            args_position = []
+            args_mapper = []
+            file_id = 0
+            for i in range(length):
+                for j in range(length):
+                    args_input.extend(('-ss', str(time_start), '-i', file_raw))
+                    args_mapper.append(f'[{file_id}:{stream_id}]')
+                    args_position.append(f'{j*stream_width}_{i*stream_height}')
+                    time_start += time_delta
+                    file_id += 1
+            arg_mapper = ''.join(args_mapper)
+            arg_position = '|'.join(args_position)
+            args = (
+                'ffmpeg', '-hwaccel', 'auto', *args_input, '-filter_complex', f'{arg_mapper}xstack=inputs={tiles}:layout={arg_position}{arg_scale}', '-vsync', 'passthrough', '-frames:v', '1', '-y', file_cache
+            )
+        print(f'[{file_raw.name}] Taking screenshot, {length}x{length} grid, {width}x{height} res, for each {time_delta} segment')
+    while subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        time.sleep(5)
+    print(f'[{file_raw.name}] Screenshot taken')
+    shutil.move(file_cache, file_out)
+
+
 def cleaner(
     dir_work_sub: pathlib.Path,
     file_raw: pathlib.Path,
-    muxers: list
+    threads: list
 ):
-    for muxer in muxers:
-        muxer.join()
+    for thread in threads:
+        thread.join()
     print(f'[{file_raw.name}] cleaning input and {dir_work_sub}...')
     shutil.rmtree(dir_work_sub)
     file_raw.unlink()
@@ -460,7 +565,7 @@ def scheduler():
                 waitpool_264.pop(0).set()
             time.sleep(5)
             cpu_percent = psutil.cpu_percent()
-        while cpu_percent < 90 and waitpool_av1:
+        while cpu_percent < 60 and waitpool_av1:
             with lock_av1:
                 waitpool_av1.pop(0).set()
             time.sleep(5)
@@ -468,7 +573,7 @@ def scheduler():
         time.sleep(5)
     print('[Scheduler] Exited')
 
-def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, stream_duration, stream_size, stream_lossless, streams, threads, amix=False):
+def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, stream_duration, stream_size, stream_lossless, stream_width, stream_height, streams, threads, amix=False):
     if amix:
         file_stream = dir_work_sub / f'{file_raw.stem}_preview_audio.nut'
         file_stream_done = dir_work_sub / f'{file_raw.stem}_preview_audio.done'
@@ -483,7 +588,8 @@ def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, st
             dir_work_sub, 
             i, file_stream, file_stream_done,
             encode_type,
-            stream_id, stream_type, stream_duration, stream_size, stream_lossless
+            stream_id, stream_type, stream_duration, stream_size, stream_lossless,
+            stream_width, stream_height
         )))
         threads[-1].start()
     return streams, threads
@@ -499,14 +605,14 @@ def db_cleaner(db):
     return db_new
 
 if __name__ == '__main__':
-    for dir in ( dir_raw, dir_archive, dir_preview, dir_work ):
+    for dir in ( dir_raw, dir_archive, dir_preview, dir_work, dir_screenshot ):
         if not dir.exists():
             dir.mkdir()
     if file_db.exists():
         with open(file_db, 'rb') as f:
             db = pickle.load(f)
         db_last = {i:j for i,j in db.items()}
-    t_scheduler = threading.Thread(target = scheduler)
+    threading.Thread(target = scheduler).start()
     try:
         while True:
             db = db_cleaner(db)
@@ -533,16 +639,20 @@ if __name__ == '__main__':
                     threads_muxer = []
                     streams_archive = []
                     streams_preview = []
+                    videos = {}
                     audios = []
                     audios_size = 0
                     audios_duration = time_zero
-                    file_archive = dir_archive / i.name
-                    file_preview = dir_preview / i.name
+                    name = f'{i.stem}.mkv'
+                    file_archive = dir_archive / name
+                    file_preview = dir_preview / name
+                    work_archive = not file_archive.exists()
+                    work_preview = not file_preview.exists()
                     for stream_id, stream in enumerate(j):
                         if stream is None:
-                            if not file_archive.exists():
+                            if work_archive:
                                 streams_archive.append(None)
-                            if not file_preview.exists():
+                            if work_preview:
                                 streams_preview.append(None)
                         else:
                             stream_type = stream['type']
@@ -550,39 +660,55 @@ if __name__ == '__main__':
                             stream_size = stream['size']
                             stream_lossless = stream['lossless']
                             if stream_type in ('video', 'audio'):
-                                if not file_archive.exists():
-                                    streams_archive, threads_archive = thread_adder(dir_work_sub, i, 'archive', stream_id, stream_type, stream_duration, stream_size, stream_lossless, streams_archive, threads_archive)
-                                if not file_preview.exists():
+                                if stream_type == 'video':
+                                    videos[stream_id] = stream
+                                if work_archive:
+                                    streams_archive, threads_archive = thread_adder(dir_work_sub, i, 'archive', stream_id, stream_type, stream_duration, stream_size, stream_lossless, 0, 0, streams_archive, threads_archive)
+                                if work_preview:
                                     if stream_type == 'video':
-                                        streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', stream_id, 'video', stream_duration, stream_size, stream_lossless, streams_preview, threads_preview)
+                                        streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', stream_id, 'video', stream_duration, stream_size, stream_lossless, stream['width'], stream['height'], streams_preview, threads_preview)
                                     else:
                                         audios.append(stream_id)
                                         audios_size += stream_size
                                         audios_duration = max(stream_duration, audios_duration)
                             else:
-                                if not file_archive.exists():
+                                if work_archive:
                                     streams_archive.append(None)
-                                if not file_preview.exists():
+                                if work_preview:
                                     streams_preview.append(None)
-                    muxers = []
-                    if not file_archive.exists():
-                        muxers.append(threading.Thread(target=muxer, args=(
+                    threads_screenshot= []
+                    if len(videos) == 1:
+                        file_screenshot = dir_screenshot / f'{i.stem}.jpg'
+                        stream_id, stream = next(iter(videos.items()))
+                        if not file_screenshot.exists():
+                            threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot.jpg', file_screenshot, stream_id, stream['duration'], stream['width'], stream['height'])))
+                            threads_screenshot[-1].start()
+                    else:
+                        dir_screenshot_sub = dir_screenshot / name
+                        dir_screenshot_sub.mkdir()
+                        for i_r, j_r in videos.items():
+                            file_screenshot = dir_screenshot_sub / f'{i.stem}_{i_r}.jpg'
+                            if not file_screenshot.exists():
+                                threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot_{i_r}.jpg', file_screenshot, i_r, j_r['duration'], j_r['width'], j_r['height'])))
+                                threads_screenshot[-1].start()
+                    threads_muxer = []
+                    if work_archive:
+                        threads_muxer.append(threading.Thread(target=muxer, args=(
                             i, dir_work_sub / f'{i.stem}_archive.mkv', file_archive,
                             streams_archive, threads_archive
                         )))
-                        muxers[-1].start()
-                    if not file_preview.exists():
+                        threads_muxer[-1].start()
+                    if work_preview:
                         if audios:
-                            streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', len(audios), 'audio', audios_duration, audios_size, True, streams_preview, threads_preview, True)
-                        muxers.append(threading.Thread(target=muxer, args=(
+                            streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', len(audios), 'audio', audios_duration, audios_size, True, 0, 0, streams_preview, threads_preview, True)
+                        threads_muxer.append(threading.Thread(target=muxer, args=(
                             i, dir_work_sub / f'{i.stem}_preview.mkv', file_preview,
                             streams_preview, threads_preview
                         )))
-                        muxers[-1].start()
-                    threading.Thread(target=cleaner, args=(dir_work_sub, i, muxers)).start()
+                        threads_muxer[-1].start()
+                    
+                    threading.Thread(target=cleaner, args=(dir_work_sub, i, threads_screenshot + threads_muxer)).start()
                     work.append(i)
-            if not t_scheduler.is_alive():
-                t_scheduler.start()
             time.sleep(5)
     except KeyboardInterrupt:
         print('[Main] Keyboard Interrupt received, exiting safely...')
