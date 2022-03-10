@@ -1,3 +1,5 @@
+import enum
+from genericpath import exists
 import threading
 import subprocess
 import json
@@ -29,8 +31,10 @@ time_second = datetime.timedelta(seconds=1)
 time_ten_seconds = datetime.timedelta(seconds=10)
 waitpool_264 = []
 waitpool_av1 = []
+waitpool_ss = []
 lock_264 = threading.Lock()
 lock_av1 = threading.Lock()
+lock_ss = threading.Lock()
 lock_db = threading.Lock()
 db = {}
 db_last = {}
@@ -70,25 +74,27 @@ class progressBar:
             raise ValueError('Terminal too small')
 
     def display(self, force_update:bool=False):
-        bar_complete = int(self.percent * self.bar_length)
-        bar_incomplete = self.bar_length - bar_complete
-        if self.percent == 0 or bar_complete != self.bar_complete or force_update:
-            print(''.join([
-                self.title,
-                ' ',
-                ''.join(['█' for i in range(bar_complete)]),
-                ''.join(['-' for i in range(bar_incomplete)]),
-                ' S:',
-                self.time_spent_str,
-                ' R:',
-                self.time_estimate_str,
-                ' '
-                f'{int(self.percent * 100)}%'.rjust(4)
-            ]),
-                end='\r'
-            )
-            self.bar_complete = bar_complete
-
+        if self.percent == 1:
+            print(' ' * self.width, end='\r')
+        else:
+            bar_complete = int(self.percent * self.bar_length)
+            bar_incomplete = self.bar_length - bar_complete
+            if self.percent == 0 or bar_complete != self.bar_complete or force_update:
+                print(''.join([
+                    self.title,
+                    ' ',
+                    ''.join(['█' for i in range(bar_complete)]),
+                    ''.join(['-' for i in range(bar_incomplete)]),
+                    ' S:',
+                    self.time_spent_str,
+                    ' R:',
+                    self.time_estimate_str,
+                    ' '
+                    f'{int(self.percent * 100)}%'.rjust(4)
+                ]),
+                    end='\r'
+                )
+                self.bar_complete = bar_complete
     def update_timer(self):
         time_now = datetime.datetime.today()
         time_spent = time_now - self.time_start
@@ -133,7 +139,7 @@ def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int
             elif char != b'\n':
                 chars.append(char)
         if chars:
-            line = ''.join([char.decode('utf-8') for char in chars])
+            line = b''.join(chars).decode('utf-8')
             if check_time:
                 m = reg_time.search(line)
                 if m:
@@ -221,14 +227,14 @@ def stream_copy(dir_work_sub, prefix, file_raw, stream_id, file_out, prompt_titl
     while subprocess.run((
         'ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy
     ), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-        print(f'{prompt_title} stream copy failed, trying that later')
+        print(f'{prompt_title} Stream copy failed, trying that later')
         time.sleep(5)
     shutil.move(file_copy, file_out)
-    print(f'{prompt_title} stream copy done')
+    print(f'{prompt_title} Stream copy done')
     file_done.touch()
 
 def concat(prefix, concat_list, file_out, prompt_title, file_done):
-    print(f'{prompt_title} transcode done, concating all parts')
+    print(f'{prompt_title} Transcode done, concating all parts')
     file_list = pathlib.Path(
         dir_work_sub,
         f'{prefix}.list'
@@ -246,7 +252,7 @@ def concat(prefix, concat_list, file_out, prompt_title, file_done):
         print(f'{prompt_title} concating failed, trying that later')
         time.sleep(5)
     shutil.move(file_concat, file_out)
-    print(f'{prompt_title} concating done')
+    print(f'{prompt_title} Concating done')
     file_done.touch()
 
 def resolution_shrinker(width, height):
@@ -338,7 +344,7 @@ def encoder(
         prompt_title = f'[{file_raw.name}] E:P S:A:{stream_id}'
     else:
         prompt_title = f'[{file_raw.name}] E:{encode_type[:1].capitalize()} S:{stream_id}:{stream_type[:1].capitalize()}'
-    print(f'{prompt_title} work started')
+    print(f'{prompt_title} Work started')
     if encode_type == 'preview' and stream_type == 'audio':
         prefix = f'{file_raw.stem}_preview_audio'
     else:
@@ -349,10 +355,10 @@ def encoder(
     concat_list = []
     check_efficiency = encode_type == 'archive'  and not lossless 
     if file_out.exists() and file_out.stat().st_size:
-        print(f'{prompt_title} output already exists, potentially broken before, trying to recover it')
+        print(f'{prompt_title} Output already exists, potentially broken before, trying to recover it')
         time_delta, size_delta = get_duration_and_size(file_out, 0, stream_type)
         if abs(duration - time_delta) < time_second:
-            print(f'{prompt_title} last transcode successful, no need to transcode')
+            print(f'{prompt_title} Last transcode successful, no need to transcode')
             file_done.touch()
             return
         suffix = 0
@@ -403,7 +409,7 @@ def encoder(
             stream_copy(dir_work_sub, prefix, file_raw, stream_id, file_out, prompt_title, file_done)
             return 
         if start >= duration or duration - start < time_second:
-            print(f'{prompt_title} seems already finished, concating all failed parts')
+            print(f'{prompt_title} Seems already finished, concating all failed parts')
             concat(prefix, concat_list, file_out, prompt_title, file_done)
             return
     if stream_type == 'video':
@@ -422,12 +428,12 @@ def encoder(
     target_time = duration - start
     while True:
         if stream_type == 'video':
-            print(f'{prompt_title} waiting for CPU resources')
+            print(f'{prompt_title} Waiting for CPU resources')
             waiter = threading.Event()
             with lock:
                 waitpool.append(waiter)
             waiter.wait()
-        print(f'{prompt_title} transcode started')
+        print(f'{prompt_title} Transcode started')
         p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         progress_bar = progressBar(prompt_title)
         if check_efficiency:
@@ -442,11 +448,11 @@ def encoder(
                 concat_list.append(file_out.name)
                 concat(prefix, concat_list, file_out, prompt_title, file_done)
             else:
-                print(f'{prompt_title} transcode done')
+                print(f'{prompt_title} Transcode done')
                 file_done.touch()
             #print(f'{prompt_title} ended {file_done}')
             break
-        print(f'{prompt_title} transcode failed, returncode: {p.wait()}, retrying that later')
+        print(f'{prompt_title} Transcode failed, returncode: {p.wait()}, retrying that later')
         time.sleep(5)
 
 def muxer(
@@ -492,9 +498,11 @@ def screenshooter(
 ):
     length = clamp(int(math.log(duration.total_seconds() + 1)), 1, 10)
     if length == 1:
+        prompt_title = f'[{file_raw.name}]'
         args = ('ffmpeg', '-hwaccel', 'auto', '-i', file_raw, '-map', f'0:{stream_id}', '-vsync', 'passthrough', '-frames:v', '1', '-y', file_cache)
-        print(f'[{file_raw.name}] Taking screenshot, single frame')
+        prompt = f'{prompt_title} Taking screenshot, single frame'
     else:
+        prompt_title = f'[{file_raw.name}] S:{stream_id}'
         width = stream_width * length
         height = stream_height * length
         if width > 65535 or length > 65535:
@@ -528,10 +536,21 @@ def screenshooter(
             args = (
                 'ffmpeg', '-hwaccel', 'auto', *args_input, '-filter_complex', f'{arg_mapper}xstack=inputs={tiles}:layout={arg_position}{arg_scale}', '-vsync', 'passthrough', '-frames:v', '1', '-y', file_cache
             )
-        print(f'[{file_raw.name}] Taking screenshot, {length}x{length} grid, {width}x{height} res, for each {time_delta} segment')
-    while subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        prompt = f'{prompt_title} Taking screenshot, {length}x{length} grid, {width}x{height} res, for each {time_delta} segment'
+    global waitpool_ss
+    while True:
+        waiter = threading.Event()
+        with lock_ss:
+            waitpool_ss.append(waiter)
+        waiter.wait()
+        print(prompt)
+        r = subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+        if r:
+            print(f'{prompt_title} Failed to screenshoot, retring that later')
+        else:
+            break
         time.sleep(5)
-    print(f'[{file_raw.name}] Screenshot taken')
+    print(f'{prompt_title} Screenshot taken')
     shutil.move(file_cache, file_out)
 
 
@@ -579,6 +598,11 @@ def scheduler():
                 waitpool_av1.pop(0).set()
             time.sleep(5)
             cpu_percent = psutil.cpu_percent()
+        while cpu_percent < 90 and waitpool_ss:
+            with lock_ss:
+                waitpool_ss.pop(0).set()
+            time.sleep(5)
+            cpu_percent = psutil.cpu_percent()
         time.sleep(5)
     print('[Scheduler] Exited')
 
@@ -606,9 +630,23 @@ def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, st
 def db_cleaner(db):
     db_new = {}
     for i_r, j_r in {i:j for i, j in db.items() if i.exists()}.items():
-        if (dir_archive / i_r.name).exists() and (dir_preview / i_r.name).exists():
-            if i_r.exists():
-                i_r.unlink()
+        name = f'{i_r.stem}.mkv'
+        finish = False
+        if (dir_archive / name).exists() and (dir_preview / name).exists():
+            dir_screenshot_sub = dir_screenshot / f'{i_r.stem}'
+            if dir_screenshot_sub.exists():
+                if dir_screenshot_sub.is_file():
+                    if i_r.exists():
+                        finish = True
+                elif dir_screenshot_sub.is_dir():
+                    finish = True
+                    for stream_id, stream in enumerate(j_r):
+                        if stream is not None and stream['type'] == 'video':
+                            if not (dir_screenshot_sub / f'{i_r.stem}_{stream_id}.jpg').exists():
+                                finish = False
+                                break
+        if finish and i_r.exists():
+            i_r.unlink()
         else:
             db_new[i_r] = j_r
     return db_new
@@ -685,7 +723,7 @@ if __name__ == '__main__':
                                     streams_archive.append(None)
                                 if work_preview:
                                     streams_preview.append(None)
-                    threads_screenshot= []
+                    threads_screenshot=[]
                     if len(videos) == 1:
                         file_screenshot = dir_screenshot / f'{i.stem}.jpg'
                         stream_id, stream = next(iter(videos.items()))
@@ -693,8 +731,9 @@ if __name__ == '__main__':
                             threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot.jpg', file_screenshot, stream_id, stream['duration'], stream['width'], stream['height'])))
                             threads_screenshot[-1].start()
                     else:
-                        dir_screenshot_sub = dir_screenshot / name
-                        dir_screenshot_sub.mkdir()
+                        dir_screenshot_sub = dir_screenshot / i.stem
+                        if not dir_screenshot_sub.exists():
+                            dir_screenshot_sub.mkdir()
                         for i_r, j_r in videos.items():
                             file_screenshot = dir_screenshot_sub / f'{i.stem}_{i_r}.jpg'
                             if not file_screenshot.exists():
