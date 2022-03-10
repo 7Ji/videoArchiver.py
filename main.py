@@ -26,6 +26,7 @@ reg_running = re.compile(r'size= *(\d+)kB')
 reg_time = re.compile(r' time=([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{2}) ')
 time_zero = datetime.timedelta()
 time_second = datetime.timedelta(seconds=1)
+time_ten_seconds = datetime.timedelta(seconds=10)
 waitpool_264 = []
 waitpool_av1 = []
 lock_264 = threading.Lock()
@@ -68,10 +69,10 @@ class progressBar:
         if self.bar_length <= 0:
             raise ValueError('Terminal too small')
 
-    def display(self):
+    def display(self, force_update:bool=False):
         bar_complete = int(self.percent * self.bar_length)
         bar_incomplete = self.bar_length - bar_complete
-        if self.percent == 0 or bar_complete != self.bar_complete:
+        if self.percent == 0 or bar_complete != self.bar_complete or force_update:
             print(''.join([
                 self.title,
                 ' ',
@@ -96,11 +97,12 @@ class progressBar:
             self.time_spent_str = str_timedelta(time_spent)
             self.time_estimate = time_spent / self.percent - time_spent
             self.time_estimate_str = str_timedelta(self.time_estimate)
+            return True
+        return False
 
     def pre_display(self):
         self.check_terminal()
-        self.update_timer()
-        self.display()
+        self.display(self.update_timer())
 
     def set(self, percent):
         self.percent = max(min(percent, 1), 0)
@@ -119,6 +121,9 @@ def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int
         inefficient = False
     check_time = size_allow is None or (size_allow is not None and progress_bar is not None)
     reader = p.stderr
+    if check_time:
+        t = time_zero
+        percent = 1
     while p.poll() is None:
         chars = []
         while True:
@@ -139,13 +144,17 @@ def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int
                             minutes = int(t[3:5]),
                             seconds = float(t[6:])
                         )
-                        progress_bar.set(t/target_time)
+                        percent = t/target_time
+                        progress_bar.set(percent)
             if size_allow is not None:
                 m = reg_running.search(line)
-                if m and int(m[1]) >= size_allow:
-                    inefficient = True
-                    p.kill()
-                    break
+                if m:
+                    size_produded = int(m[1])
+                    if size_produded >= size_allow or (
+                        check_time and t > time_ten_seconds and size_produded/size_allow >= percent):
+                        inefficient = True
+                        p.kill()
+                        break
                 pass
         else:
             p.kill()
