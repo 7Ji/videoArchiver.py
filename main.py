@@ -1,5 +1,6 @@
-import enum
-from genericpath import exists
+if __name__ != '__main__':
+    raise RuntimeError('REFUSED to be importd, you should only run this as sciprt!')
+    
 import threading
 import subprocess
 import json
@@ -11,6 +12,7 @@ import psutil
 import time
 import pickle
 import math
+
 
 dir_raw = pathlib.Path('raw')
 dir_archive = pathlib.Path('archive')
@@ -29,25 +31,19 @@ reg_time = re.compile(r' time=([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{2}) ')
 time_zero = datetime.timedelta()
 time_second = datetime.timedelta(seconds=1)
 time_ten_seconds = datetime.timedelta(seconds=10)
-waitpool_264 = []
-waitpool_av1 = []
-waitpool_ss = []
-lock_264 = threading.Lock()
-lock_av1 = threading.Lock()
-lock_ss = threading.Lock()
-lock_db = threading.Lock()
-lock_work = threading.Lock()
-db = {}
-db_last = {}
-work = []
-dirs_work_sub = []
+waitpool_264, waitpool_av1, waitpool_ss =  ([] for i in range(3))
+lock_264, lock_av1, lock_ss, lock_db, lock_work = (threading.Lock() for i in range(5))
+db, db_last = ({} for i in range(2))
+work, dirs_work_sub = ([] for i in range(2))
 work_end = False
 bars = False
+
 
 class EndExecution(RuntimeError):
     pass
 
-class cleanPrinter:
+
+class CleanPrinter:
     '''Fancier printer, the main purpose of this class is to cleanly print message
     '''
 
@@ -58,22 +54,22 @@ class cleanPrinter:
     @staticmethod
     def check_terminal():
         width = shutil.get_terminal_size()[0]
-        if width == cleanPrinter.width:
+        if width == CleanPrinter.width:
             return 
-        cleanPrinter.width = width
+        CleanPrinter.width = width
 
 
     @staticmethod
     def clear_line():
         '''Always clean the line before printing, this is to avoid the unfinished progress bar being stuck on the screen
         '''
-        print(' ' * cleanPrinter.width, end='\r')
+        print(' ' * CleanPrinter.width, end='\r')
 
 
     @staticmethod
     def print(content, end=None):
-        if cleanPrinter.bars: # Only clear line if there are progress bars being displayed
-            cleanPrinter.clear_line()
+        if CleanPrinter.bars: # Only clear line if there are progress bars being displayed
+            CleanPrinter.clear_line()
         if end is None:
             print(content)
         else:
@@ -93,11 +89,11 @@ def clamp(n, minimum, maximum):
     return min(max(n, minimum), maximum)
 
 
-class progressBar(cleanPrinter):
+class progressBar(CleanPrinter):
     '''Progress bar with title, percent, spent/estimate time
     '''
     def __init__(self, title = '[Status]'):
-        cleanPrinter.bars += 1
+        CleanPrinter.bars += 1
         if title[-1] != ' ':
             title += ' '
         self.title = title
@@ -116,14 +112,14 @@ class progressBar(cleanPrinter):
 
     def display(self, update=False):
         if self.percent == 1:
-            cleanPrinter.clear_line()
-            cleanPrinter.bars -= 1
+            CleanPrinter.clear_line()
+            CleanPrinter.bars -= 1
         else:
             width = shutil.get_terminal_size()[0]
-            width_update = width != cleanPrinter.width
+            width_update = width != CleanPrinter.width
             if update or width_update:
                 if width_update:
-                    cleanPrinter.width = width 
+                    CleanPrinter.width = width
                 self.display_bar = False
                 self.display_percent = False
                 self.display_spent = False
@@ -137,7 +133,7 @@ class progressBar(cleanPrinter):
                             self.display_spent = True
                             if length > 26:  # 12 for time_estimate_str
                                 self.display_estimate = True
-                    self.bar_length = cleanPrinter.width - self.title_length - 4 * self.display_percent - 11 * self.display_spent - 11 * self.display_estimate
+                    self.bar_length = CleanPrinter.width - self.title_length - 4 * self.display_percent - 11 * self.display_spent - 11 * self.display_estimate
             if not self.display_bar:
                 return
             bar_complete = int(self.percent * self.bar_length)
@@ -197,6 +193,10 @@ def check_end_kill(p:subprocess.Popen):
             used in stream_info (scope: main)
             used in delta_adder (scope: child/encoder)
             used in encoder (scope: child/encoder)
+
+    used in encoder (scope: child/encoder)
+    used in muxer (scope: child/ muxer)
+    used in scneenshooter (scope: child/screenshooter)
 
     scope: child
         Should the work_end flag be captured, raise the EndExecution exception
@@ -325,7 +325,6 @@ def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int
         return inefficient
 
 
-
 def get_duration_and_size(media: pathlib.Path, stream_id: int, stream_type: str):
     '''Get duration and size from a stream from a media file, just a wrapper, 
 
@@ -354,13 +353,24 @@ def stream_info(file_raw, stream_id, stream_type, stream):
     duration, size = get_duration_and_size(file_raw, stream_id, stream_type)
     if stream_type == 'video':
         lossless = stream['codec_name'] in codec_vlo
+        if 'side_data_list' in stream and 'rotation' in stream['side_data_list'][0]:
+            return {
+                'type': stream_type,
+                'lossless': lossless,
+                'width': stream['width'],
+                'height': stream['height'],
+                'duration': duration,
+                'size': size,
+                'rotation': stream['side_data_list'][0]['rotation']
+            }
         return {
             'type': stream_type,
             'lossless': lossless,
             'width': stream['width'],
             'height': stream['height'],
             'duration': duration,
-            'size': size
+            'size': size,
+            'rotation': None
         }
     else:
         lossless = stream['codec_name'] in codec_alo
@@ -380,7 +390,7 @@ def stream_copy(dir_work_sub, prefix, file_raw, stream_id, file_out, prompt_titl
     scope: child
         The EndExecution exception could be raised by ffmpeg_dumb_poller and check_end, we pass it as is
     '''
-    cleanPrinter.print(f'{prompt_title} Transcode inefficient, copying raw stream instead')
+    CleanPrinter.print(f'{prompt_title} Transcode inefficient, copying raw stream instead')
     file_copy = pathlib.Path(
         dir_work_sub,
         f'{prefix}_copy.nut'
@@ -388,10 +398,10 @@ def stream_copy(dir_work_sub, prefix, file_raw, stream_id, file_out, prompt_titl
     args = ('ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy)
     while ffmpeg_dumb_poller(subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)):
         check_end()
-        cleanPrinter.print(f'{prompt_title} Stream copy failed, trying that later')
+        CleanPrinter.print(f'{prompt_title} Stream copy failed, trying that later')
         time.sleep(5)
     shutil.move(file_copy, file_out)
-    cleanPrinter.print(f'{prompt_title} Stream copy done')
+    CleanPrinter.print(f'{prompt_title} Stream copy done')
     file_done.touch()
 
 
@@ -403,7 +413,7 @@ def concat(prefix, concat_list, file_out, prompt_title, file_done):
     scope: child
         The EndExecution exception could be raised by check_end and ffmpeg_dumb_poller, we pass it as is
     '''
-    cleanPrinter.print(f'{prompt_title} Transcode done, concating all parts')
+    CleanPrinter.print(f'{prompt_title} Transcode done, concating all parts')
     file_list = pathlib.Path(
         dir_work_sub,
         f'{prefix}.list'
@@ -419,10 +429,10 @@ def concat(prefix, concat_list, file_out, prompt_title, file_done):
     args = ('ffmpeg', '-f', 'concat', '-safe', '0', '-i', file_list, '-c', 'copy', '-map', '0', '-y', file_concat)
     while ffmpeg_dumb_poller(subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)):
         check_end()
-        cleanPrinter.print(f'{prompt_title} concating failed, trying that later')
+        CleanPrinter.print(f'{prompt_title} concating failed, trying that later')
         time.sleep(5)
     shutil.move(file_concat, file_out)
-    cleanPrinter.print(f'{prompt_title} Concating done')
+    CleanPrinter.print(f'{prompt_title} Concating done')
     file_done.touch()
 
 
@@ -477,7 +487,7 @@ def wait_close(file_raw:pathlib.Path):
                 for f in p.open_files():
                     if file_raw.samefile(f.path):
                         if not hint:
-                            cleanPrinter.print(f'[Scanner] Jammed, {file_raw} is opened by {p.pid} {p.cmdline()}')
+                            CleanPrinter.print(f'[Scanner] Jammed, {file_raw} is opened by {p.pid} {p.cmdline()}')
                             hint = True
                         opened = True
                         break
@@ -487,10 +497,10 @@ def wait_close(file_raw:pathlib.Path):
         if size_new != size_old:
             opened = True
             if not hint:
-                cleanPrinter.print(f'[Scanner] Jammed, {file_raw} is being written')
+                CleanPrinter.print(f'[Scanner] Jammed, {file_raw} is being written')
         if not opened:
             if hint:
-                cleanPrinter.print(f'[Scanner] {file_raw} closed writing, continue scanning')
+                CleanPrinter.print(f'[Scanner] {file_raw} closed writing, continue scanning')
             break
         size_old = size_new
         time.sleep(5)
@@ -521,7 +531,7 @@ def scan_dir(d: pathlib.Path):
                         streams = []
                         video = False
                         for stream_id, s in enumerate(
-                            json.loads(subprocess.run(('ffprobe', '-show_format', '-show_streams', '-of', 'json', i), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout)['streams']
+                            json.loads(subprocess.run(('ffprobe', '-show_streams', '-of', 'json', i), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout)['streams']
                         ):
                             if s['codec_type'] in ('video', 'audio'):
                                 if s['codec_type'] == 'video':
@@ -586,14 +596,14 @@ def encoder(
             concat
             wait_cpu
 
-        Should that, or the end_work flag be captured, return to end this thread
+        Should that, return to end this thread
     '''
     try:
         if encode_type == 'preview' and stream_type == 'audio':
             prompt_title = f'[{file_raw.name}] E:P S:A:{stream_id}'
         else:
             prompt_title = f'[{file_raw.name}] E:{encode_type[:1].capitalize()} S:{stream_id}:{stream_type[:1].capitalize()}'
-        cleanPrinter.print(f'{prompt_title} Work started')
+        CleanPrinter.print(f'{prompt_title} Work started')
         if encode_type == 'preview' and stream_type == 'audio':
             prefix = f'{file_raw.stem}_preview_audio'
         else:
@@ -604,17 +614,16 @@ def encoder(
         concat_list = []
         check_efficiency = encode_type == 'archive'  and not lossless 
         if file_out.exists() and file_out.stat().st_size:
-            cleanPrinter.print(f'{prompt_title} Output already exists, potentially broken before, trying to recover it')
+            CleanPrinter.print(f'{prompt_title} Output already exists, potentially broken before, trying to recover it')
             time_delta, size_delta = get_duration_and_size(file_out, 0, stream_type)
             if abs(duration - time_delta) < time_second:
-                cleanPrinter.print(f'{prompt_title} Last transcode successful, no need to transcode')
+                CleanPrinter.print(f'{prompt_title} Last transcode successful, no need to transcode')
                 file_done.touch()
                 return
             suffix = 0
             file_check = dir_work_sub / f'{prefix}_{suffix}.nut'
             while file_check.exists() and file_check.stat().st_size:
-                if work_end:
-                    return
+                check_end()
                 start, size_exist = delta_adder(file_check, stream_type, start, size_exist)
                 concat_list.append(file_check.name)
                 suffix += 1
@@ -622,37 +631,36 @@ def encoder(
             file_recovery = dir_work_sub / f'{prefix}_recovery.nut'
             poll = False
             if stream_type == 'video':
-                cleanPrinter.print(f'{prompt_title} Checking if the interrupt file is usable')
+                CleanPrinter.print(f'{prompt_title} Checking if the interrupt file is usable')
                 p = subprocess.Popen(('ffprobe', '-show_frames', '-select_streams', 'v:0', '-of', 'json', file_out), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
                 if ffmpeg_dumb_poller(p) == 0:
-                    cleanPrinter.print(f'{prompt_title} Analyzing available frames')
+                    CleanPrinter.print(f'{prompt_title} Analyzing available frames')
                     frames = json.loads(p.stdout)['frames']
                     frame_last = 0
                     for frame_id, frame in enumerate(reversed(frames)):
-                        if work_end:
-                            return
+                        check_end()
                         if frame['key_frame']:
                             frame_last = len(frames) - frame_id - 1
                             break
                     if frame_last:
-                        cleanPrinter.print(f'{prompt_title} {frame_last} frames seem usable, trying to recovering those')
+                        CleanPrinter.print(f'{prompt_title} {frame_last} frames seem usable, trying to recovering those')
                         p = subprocess.Popen(('ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', '-vframes', str(frame_last), file_recovery), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                         poll = True
                     else:
-                        cleanPrinter.print(f'{prompt_title} No frames usable')
+                        CleanPrinter.print(f'{prompt_title} No frames usable')
             else:
                 poll = True
                 p = subprocess.Popen(('ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             if poll:
                 r, t, s = ffmpeg_time_size_poller(p, stream_type)
                 if r:
-                    cleanPrinter.print(f'{prompt_title} Recovery failed')
+                    CleanPrinter.print(f'{prompt_title} Recovery failed')
                 else:
                     shutil.move(file_recovery, file_check)
                     start += t
                     size_exist += s
                     concat_list.append(file_check.name)
-                    cleanPrinter.print(f'{prompt_title} {t} of failed transcode recovered')
+                    CleanPrinter.print(f'{prompt_title} {t} of failed transcode recovered')
             file_out.unlink()
             with file_concat_pickle.open('wb') as f:
                 pickle.dump((concat_list, start, size_exist), f)
@@ -665,7 +673,7 @@ def encoder(
                 stream_copy(dir_work_sub, prefix, file_raw, stream_id, file_out, prompt_title, file_done)
                 return 
             if start >= duration or duration - start < time_second:
-                cleanPrinter.print(f'{prompt_title} Seems already finished, concating all failed parts')
+                CleanPrinter.print(f'{prompt_title} Seems already finished, concating all failed parts')
                 concat(prefix, concat_list, file_out, prompt_title, file_done)
                 return
         if stream_type == 'video':
@@ -683,12 +691,11 @@ def encoder(
         args = args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_type, stream_width, stream_height)
         target_time = duration - start
         while True:
-            if work_end:
-                return
+            check_end()
             if stream_type == 'video':
-                cleanPrinter.print(f'{prompt_title} Waiting for CPU resources')
+                CleanPrinter.print(f'{prompt_title} Waiting for CPU resources')
                 wait_cpu(lock, waitpool)
-            cleanPrinter.print(f'{prompt_title} Transcode started')
+            CleanPrinter.print(f'{prompt_title} Transcode started')
             p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             progress_bar = progressBar(prompt_title)
             if check_efficiency:
@@ -703,11 +710,11 @@ def encoder(
                     concat_list.append(file_out.name)
                     concat(prefix, concat_list, file_out, prompt_title, file_done)
                 else:
-                    cleanPrinter.print(f'{prompt_title} Transcode done')
+                    CleanPrinter.print(f'{prompt_title} Transcode done')
                     file_done.touch()
                 #cleanPrinter.print(f'{prompt_title} ended {file_done}')
                 break
-            cleanPrinter.print(f'{prompt_title} Transcode failed, returncode: {p.wait()}, retrying that later')
+            CleanPrinter.print(f'{prompt_title} Transcode failed, returncode: {p.wait()}, retrying that later')
             time.sleep(5)
     except EndExecution:
         return
@@ -741,6 +748,7 @@ def muxer(
     scope: child-main
         As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
             join
+            check_end
             ffmpeg_dumb_poller
 
         Should that, or the end_work flag be captured, return to end this thread
@@ -753,25 +761,23 @@ def muxer(
         input_id = 0
         mappers = []
         for stream_id, stream in enumerate(streams):
-            if work_end:
-                return
+            check_end()
             if stream is None:
                 mappers += ['-map', f'0:{stream_id}']
             else:
                 inputs += ['-i', stream]
                 input_id += 1
                 mappers += ['-map', f'{input_id}']
-        cleanPrinter.print(f'[{file_raw.name}] Muxing to {file_out}...')
+        CleanPrinter.print(f'[{file_raw.name}] Muxing to {file_out}...')
         args = ('ffmpeg', *inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_cache)
         while ffmpeg_dumb_poller(subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)):
-            if work_end:
-                return
-            cleanPrinter.print(f'[{file_raw.name}] Muxing failed, retry that later')
+            check_end()
+            CleanPrinter.print(f'[{file_raw.name}] Muxing failed, retry that later')
             time.sleep(5)
     except EndExecution:
         return
     shutil.move(file_cache, file_out)
-    cleanPrinter.print(f'[{file_raw.name}] Muxing finished')
+    CleanPrinter.print(f'[{file_raw.name}] Muxing finished')
 
 
 def screenshooter(
@@ -781,7 +787,8 @@ def screenshooter(
     stream_id: int,
     duration: datetime.timedelta,
     stream_width: int,
-    stream_height: int
+    stream_height: int,
+    rotation: int
 ):
     '''Taking screenshot for video stream, according to its duration, making mosaic screenshot
 
@@ -791,69 +798,70 @@ def screenshooter(
         As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
             cpu_wait
             ffmpeg_dumb_poller
+            check_end
 
-        Should that, or the end_work flag be captured, return to end this thread
+        Should that, return to end this thread
     '''
-    args_ffmpeg = ('ffmpeg', '-hwaccel', 'auto')
-    args_out = ('-vsync', 'passthrough', '-frames:v', '1', '-y', file_cache)
-    length = clamp(int(math.log(duration.total_seconds()/2 + 1)), 1, 10)
-    if length == 1:
-        prompt_title = f'[{file_raw.name}]'
-        args = (*args_ffmpeg, '-ss', str(duration/2), '-i', file_raw, '-map', f'0:{stream_id}', *args_out)
-        prompt = f'{prompt_title} Taking screenshot, single frame'
-    else:
-        prompt_title = f'[{file_raw.name}] S:{stream_id}'
-        width = stream_width * length
-        height = stream_height * length
-        if width > 65535 or length > 65535:
-            while width > 65535 or length > 65535:
-                if work_end:
-                    return
-                width //= 2
-                length //= 2
-            arg_scale = f',scale={width}x{height}'
-        else:
-            arg_scale = ''
-        tiles = length**2
-        time_delta = duration / tiles
-        if duration < datetime.timedelta(seconds=tiles*5):
-            args = (
-                *args_ffmpeg, '-i', file_raw, '-map', f'0:{stream_id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta.total_seconds()}),tile={length}x{length}{arg_scale}', *args_out
-            )
-        else:
-            time_start = time_zero
-            args_input = []
-            args_position = []
-            args_mapper = []
-            file_id = 0
-            for i in range(length):
-                for j in range(length):
-                    if work_end:
-                        return
-                    args_input.extend(('-ss', str(time_start), '-i', file_raw))
-                    args_mapper.append(f'[{file_id}:{stream_id}]')
-                    args_position.append(f'{j*stream_width}_{i*stream_height}')
-                    time_start += time_delta
-                    file_id += 1
-            arg_mapper = ''.join(args_mapper)
-            arg_position = '|'.join(args_position)
-            args = (
-                *args_ffmpeg, *args_input, '-filter_complex', f'{arg_mapper}xstack=inputs={tiles}:layout={arg_position}{arg_scale}', *args_out
-            )
-        prompt = f'{prompt_title} Taking screenshot, {length}x{length} grid, for each {time_delta} segment, {width}x{height} res'
-    global waitpool_ss
     try:
+        args_ffmpeg = ('ffmpeg', '-hwaccel', 'auto')
+        args_out = ('-vsync', 'passthrough', '-frames:v', '1', '-y', file_cache)
+        length = clamp(int(math.log(duration.total_seconds()/2 + 1)), 1, 10)
+        if length == 1:
+            prompt_title = f'[{file_raw.name}]'
+            args = (*args_ffmpeg, '-ss', str(duration/2), '-i', file_raw, '-map', f'0:{stream_id}', *args_out)
+            prompt = f'{prompt_title} Taking screenshot, single frame'
+        else:
+            prompt_title = f'[{file_raw.name}] S:{stream_id}'
+            if rotation in (90, -90):
+                stream_width, stream_height = stream_height, stream_width
+            width = stream_width * length
+            height = stream_height * length
+            if width > 65535 or length > 65535:
+                while width > 65535 or length > 65535:
+                    check_end()
+                    width //= 2
+                    length //= 2
+                arg_scale = f',scale={width}x{height}'
+            else:
+                arg_scale = ''
+            tiles = length**2
+            time_delta = duration / tiles
+            if duration < datetime.timedelta(seconds=tiles*5):
+                args = (
+                    *args_ffmpeg, '-i', file_raw, '-map', f'0:{stream_id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta.total_seconds()}),tile={length}x{length}{arg_scale}', *args_out
+                )
+            else:
+                time_start = time_zero
+                args_input = []
+                args_position = []
+                args_mapper = []
+                file_id = 0
+                for i in range(length):
+                    for j in range(length):
+                        check_end()
+                        args_input.extend(('-ss', str(time_start), '-i', file_raw))
+                        args_mapper.append(f'[{file_id}:{stream_id}]')
+                        args_position.append(f'{j*stream_width}_{i*stream_height}')
+                        time_start += time_delta
+                        file_id += 1
+                arg_mapper = ''.join(args_mapper)
+                arg_position = '|'.join(args_position)
+                args = (
+                    *args_ffmpeg, *args_input, '-filter_complex', f'{arg_mapper}xstack=inputs={tiles}:layout={arg_position}{arg_scale}', *args_out
+                )
+            prompt = f'{prompt_title} Taking screenshot, {length}x{length} grid, for each {time_delta} segment, {width}x{height} res'
+        global waitpool_ss
         while True:
             wait_cpu(lock_ss, waitpool_ss)
-            cleanPrinter.print(prompt)
+            CleanPrinter.print(prompt)
             if ffmpeg_dumb_poller(subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)):
-                cleanPrinter.print(f'{prompt_title} Failed to screenshoot, retring that later')
+                CleanPrinter.print(f'{prompt_title} Failed to screenshoot, retring that later')
             else:
                 break
             time.sleep(5)
     except EndExecution:
         return
-    cleanPrinter.print(f'{prompt_title} Screenshot taken')
+    CleanPrinter.print(f'{prompt_title} Screenshot taken')
     shutil.move(file_cache, file_out)
 
 
@@ -877,7 +885,7 @@ def cleaner(
     try:
         for thread in threads:
             join(thread)
-        cleanPrinter.print(f'[{file_raw.name}] Cleaning input and {dir_work_sub}...')
+        CleanPrinter.print(f'[{file_raw.name}] Cleaning input and {dir_work_sub}...')
         shutil.rmtree(dir_work_sub)
         file_raw.unlink()
         check_end()
@@ -893,7 +901,7 @@ def cleaner(
             work.remove(file_raw)
     except EndExecution:
         return
-    cleanPrinter.print(f'[{file_raw.name}] Done')
+    CleanPrinter.print(f'[{file_raw.name}] Done')
 
 def db_write():
     '''Write the db if it's updated
@@ -917,7 +925,7 @@ def db_write():
             with open(file_db, 'wb') as f:
                 check_end()
                 pickle.dump(db, f)
-            cleanPrinter.print('[Database] Saved')
+            CleanPrinter.print('[Database] Saved')
             db_last = {i:j for i, j in db.items()}
 
             
@@ -935,7 +943,7 @@ def scheduler():
     global waitpool_264
     global waitpool_av1
     global work_end
-    cleanPrinter.print('[Scheduler] Started')
+    CleanPrinter.print('[Scheduler] Started')
     while not work_end:
         cpu_percent = psutil.cpu_percent()
         try:
@@ -966,7 +974,7 @@ def scheduler():
     for waitpool in waitpool_264, waitpool_av1, waitpool_ss:
         while waitpool:
             waitpool.pop(0).set()
-    cleanPrinter.print('[Scheduler] Exited')
+    CleanPrinter.print('[Scheduler] Exited')
 
 def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, stream_duration, stream_size, stream_lossless, stream_width, stream_height, streams, threads, amix=False):
     '''Add a certainer encoder thread to threads, and start it just then.
@@ -1027,115 +1035,110 @@ def db_cleaner(db):
             db_new[i_r] = j_r
     return db_new
 
-if __name__ == '__main__':
-    for dir in ( dir_raw, dir_archive, dir_preview, dir_work, dir_screenshot ):
-        if not dir.exists():
-            dir.mkdir()
-    if file_db.exists():
-        with open(file_db, 'rb') as f:
-            db = pickle.load(f)
-        db_last = {i:j for i,j in db.items()}
-    threading.Thread(target = scheduler).start()
-    try:
-        while True:
-            db = db_cleaner(db)
-            db_write()
-            scan_dir(dir_raw)
-            for i, j in db.items():
-                if j is not None and i not in work:
-                    dir_work_sub = pathlib.Path(
-                        dir_work,
-                        i.stem
-                    )
-                    if dir_work_sub in dirs_work_sub:
-                        suffix = 0
-                        while dir_work_sub in dirs_work_sub:
-                            dir_work_sub = pathlib.Path(
-                                dir_work,
-                                i.stem + str(suffix)
-                            )
-                    if not dir_work_sub.exists():
-                        dir_work_sub.mkdir()
-                    dirs_work_sub.append(dir_work_sub)
-                    threads_archive = []
-                    threads_preview = []
-                    threads_muxer = []
-                    streams_archive = []
-                    streams_preview = []
-                    videos = {}
-                    audios = []
-                    audios_size = 0
-                    audios_duration = time_zero
-                    name = f'{i.stem}.mkv'
-                    file_archive = dir_archive / name
-                    file_preview = dir_preview / name
-                    work_archive = not file_archive.exists()
-                    work_preview = not file_preview.exists()
-                    for stream_id, stream in enumerate(j):
-                        if stream is None:
+print()
+for dir in ( dir_raw, dir_archive, dir_preview, dir_work, dir_screenshot ):
+    if not dir.exists():
+        dir.mkdir()
+if file_db.exists():
+    with open(file_db, 'rb') as f:
+        db = pickle.load(f)
+    db_last = {i:j for i,j in db.items()}
+threading.Thread(target = scheduler).start()
+try:
+    while True:
+        db = db_cleaner(db)
+        db_write()
+        scan_dir(dir_raw)
+        for i, j in db.items():
+            if j is not None and i not in work:
+                dir_work_sub = pathlib.Path(
+                    dir_work,
+                    i.stem
+                )
+                if dir_work_sub in dirs_work_sub:
+                    suffix = 0
+                    while dir_work_sub in dirs_work_sub:
+                        dir_work_sub = pathlib.Path(
+                            dir_work,
+                            i.stem + str(suffix)
+                        )
+                if not dir_work_sub.exists():
+                    dir_work_sub.mkdir()
+                dirs_work_sub.append(dir_work_sub)
+                threads_archive, threads_preview, threads_muxer, streams_archive, streams_preview, audios =  ([] for i in range(6))
+                videos = {}
+                audios_size = 0
+                audios_duration = time_zero
+                name = f'{i.stem}.mkv'
+                file_archive = dir_archive / name
+                file_preview = dir_preview / name
+                work_archive = not file_archive.exists()
+                work_preview = not file_preview.exists()
+                for stream_id, stream in enumerate(j):
+                    if stream is None:
+                        if work_archive:
+                            streams_archive.append(None)
+                        if work_preview:
+                            streams_preview.append(None)
+                    else:
+                        stream_type = stream['type']
+                        stream_duration = stream['duration']
+                        stream_size = stream['size']
+                        stream_lossless = stream['lossless']
+                        if stream_type in ('video', 'audio'):
+                            if stream_type == 'video':
+                                videos[stream_id] = stream
+                            if work_archive:
+                                streams_archive, threads_archive = thread_adder(dir_work_sub, i, 'archive', stream_id, stream_type, stream_duration, stream_size, stream_lossless, 0, 0, streams_archive, threads_archive)
+                            if work_preview:
+                                if stream_type == 'video':
+                                    streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', stream_id, 'video', stream_duration, stream_size, stream_lossless, stream['width'], stream['height'], streams_preview, threads_preview)
+                                else:
+                                    audios.append(stream_id)
+                                    audios_size += stream_size
+                                    audios_duration = max(stream_duration, audios_duration)
+                        else:
                             if work_archive:
                                 streams_archive.append(None)
                             if work_preview:
                                 streams_preview.append(None)
-                        else:
-                            stream_type = stream['type']
-                            stream_duration = stream['duration']
-                            stream_size = stream['size']
-                            stream_lossless = stream['lossless']
-                            if stream_type in ('video', 'audio'):
-                                if stream_type == 'video':
-                                    videos[stream_id] = stream
-                                if work_archive:
-                                    streams_archive, threads_archive = thread_adder(dir_work_sub, i, 'archive', stream_id, stream_type, stream_duration, stream_size, stream_lossless, 0, 0, streams_archive, threads_archive)
-                                if work_preview:
-                                    if stream_type == 'video':
-                                        streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', stream_id, 'video', stream_duration, stream_size, stream_lossless, stream['width'], stream['height'], streams_preview, threads_preview)
-                                    else:
-                                        audios.append(stream_id)
-                                        audios_size += stream_size
-                                        audios_duration = max(stream_duration, audios_duration)
-                            else:
-                                if work_archive:
-                                    streams_archive.append(None)
-                                if work_preview:
-                                    streams_preview.append(None)
-                    threads_screenshot=[]
-                    if len(videos) == 1:
-                        file_screenshot = dir_screenshot / f'{i.stem}.jpg'
-                        stream_id, stream = next(iter(videos.items()))
+                threads_screenshot=[]
+                if len(videos) == 1:
+                    file_screenshot = dir_screenshot / f'{i.stem}.jpg'
+                    stream_id, stream = next(iter(videos.items()))
+                    if not file_screenshot.exists():
+                        threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot.jpg', file_screenshot, stream_id, stream['duration'], stream['width'], stream['height'], stream['rotation'])))
+                        threads_screenshot[-1].start()
+                else:
+                    dir_screenshot_sub = dir_screenshot / i.stem
+                    if not dir_screenshot_sub.exists():
+                        dir_screenshot_sub.mkdir()
+                    for i_r, j_r in videos.items():
+                        file_screenshot = dir_screenshot_sub / f'{i.stem}_{i_r}.jpg'
                         if not file_screenshot.exists():
-                            threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot.jpg', file_screenshot, stream_id, stream['duration'], stream['width'], stream['height'])))
+                            threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot_{i_r}.jpg', file_screenshot, i_r, j_r['duration'], j_r['width'], j_r['height'], j_r['rotation'])))
                             threads_screenshot[-1].start()
-                    else:
-                        dir_screenshot_sub = dir_screenshot / i.stem
-                        if not dir_screenshot_sub.exists():
-                            dir_screenshot_sub.mkdir()
-                        for i_r, j_r in videos.items():
-                            file_screenshot = dir_screenshot_sub / f'{i.stem}_{i_r}.jpg'
-                            if not file_screenshot.exists():
-                                threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot_{i_r}.jpg', file_screenshot, i_r, j_r['duration'], j_r['width'], j_r['height'])))
-                                threads_screenshot[-1].start()
-                    threads_muxer = []
-                    if work_archive:
-                        threads_muxer.append(threading.Thread(target=muxer, args=(
-                            i, dir_work_sub / f'{i.stem}_archive.mkv', file_archive,
-                            streams_archive, threads_archive
-                        )))
-                        threads_muxer[-1].start()
-                    if work_preview:
-                        if audios:
-                            streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', len(audios), 'audio', audios_duration, audios_size, True, 0, 0, streams_preview, threads_preview, True)
-                        threads_muxer.append(threading.Thread(target=muxer, args=(
-                            i, dir_work_sub / f'{i.stem}_preview.mkv', file_preview,
-                            streams_preview, threads_preview
-                        )))
-                        threads_muxer[-1].start()
-                    
-                    threading.Thread(target=cleaner, args=(dir_work_sub, i, threads_screenshot + threads_muxer)).start()
-                    with lock_work:
-                        work.append(i)
-            time.sleep(5)
-    except KeyboardInterrupt:
-        cleanPrinter.print('[Main] Keyboard Interrupt received, exiting safely...')
-        db_write()
-        work_end = True
+                threads_muxer = []
+                if work_archive:
+                    threads_muxer.append(threading.Thread(target=muxer, args=(
+                        i, dir_work_sub / f'{i.stem}_archive.mkv', file_archive,
+                        streams_archive, threads_archive
+                    )))
+                    threads_muxer[-1].start()
+                if work_preview:
+                    if audios:
+                        streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', len(audios), 'audio', audios_duration, audios_size, True, 0, 0, streams_preview, threads_preview, True)
+                    threads_muxer.append(threading.Thread(target=muxer, args=(
+                        i, dir_work_sub / f'{i.stem}_preview.mkv', file_preview,
+                        streams_preview, threads_preview
+                    )))
+                    threads_muxer[-1].start()
+                
+                threading.Thread(target=cleaner, args=(dir_work_sub, i, threads_screenshot + threads_muxer)).start()
+                with lock_work:
+                    work.append(i)
+        time.sleep(5)
+except KeyboardInterrupt:
+    CleanPrinter.print('[Main] Keyboard Interrupt received, exiting safely...')
+    db_write()
+    work_end = True
