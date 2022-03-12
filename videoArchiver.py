@@ -1,7 +1,7 @@
 if __name__ != '__main__':
     raise RuntimeError('REFUSED to be imported, you should only run this as sciprt! (i.e. python videoArchiver.py, or python -m videoArchiver) Most functions are heavily dependent on global variables only set in the main body to reduce memory usage. If you really want to test this as a module, you could capture this RuntimeError, but videoArchiver.py is not guaranteed to not fuck up your computer')
     
-from asyncio import threads
+
 import threading
 import subprocess
 import json
@@ -124,8 +124,6 @@ class ProgressBar(CleanPrinter):
     def __init__(self, log: LoggingWrapper = '[Title]'):
         with CleanPrinter.lock_bar:
             CleanPrinter.bars += 1
-        # if title[-1] != ' ':
-        #     title += ' '
         self.log = log
         log.debug('Encoder started')
         self.title_length = len(log.title)
@@ -218,54 +216,54 @@ class ProgressBar(CleanPrinter):
         self.display()
 
 
-def check_end_kill(p:subprocess.Popen):
-    """Check if the work_end flag is set, and if it is, raise the EndExecution exception and kill the Popen object
+# def check_end_kill(p:subprocess.Popen):
+#     """Check if the work_end flag is set, and if it is, raise the EndExecution exception and kill the Popen object
 
-    used in ffmpeg_dumb_poller (scope: child)
-        used in stream_copy (scope: child/encoder)
-        used in encoder (scope: child/endoer)
-        used in muxer (scope: child/muxer)
-        used in screenshooter (scopte: child/screenshooter)
+#     used in ffmpeg_dumb_poller (scope: child)
+#         used in stream_copy (scope: child/encoder)
+#         used in encoder (scope: child/endoer)
+#         used in muxer (scope: child/muxer)
+#         used in screenshooter (scopte: child/screenshooter)
     
-    used in ffmpeg_time_size_poller (scope: main + child)
-        used in encoder (scope: child/encoder)
-        used in get_duration_and_size (wrapper)
-            used in stream_info (scope: main)
-            used in delta_adder (scope: child/encoder)
-            used in encoder (scope: child/encoder)
+#     used in ffmpeg_time_size_poller (scope: main + child)
+#         used in encoder (scope: child/encoder)
+#         used in get_duration_and_size (wrapper)
+#             used in stream_info (scope: main)
+#             used in delta_adder (scope: child/encoder)
+#             used in encoder (scope: child/encoder)
 
-    used in encoder (scope: child/encoder)
-    used in muxer (scope: child/ muxer)
-    used in scneenshooter (scope: child/screenshooter)
+#     used in encoder (scope: child/encoder)
+#     used in muxer (scope: child/ muxer)
+#     used in scneenshooter (scope: child/screenshooter)
 
-    scope: child
-        Should the work_end flag be captured, raise the EndExecution exception
-    """
-    if work_end:
-        p.kill()
-        logging.debug(f'[Subprocess] Killed {p}')
-        raise EndExecution
+#     scope: child
+#         Should the work_end flag be captured, raise the EndExecution exception
+#     """
+#     if work_end:
+#         p.kill()
+#         logging.debug(f'[Subprocess] Killed {p}')
+#         raise EndExecution
 
-def check_end():
-    """Check if the work_end flag is set, and if it is, raise the EndExecution exception
+# def check_end():
+#     """Check if the work_end flag is set, and if it is, raise the EndExecution exception
 
-    used in stream_copy (scope: child/encoder)
-    used in concat (scope: child/encoder)
-    used in wait_cpu (scope: child)
-        used in encoder (scope: child/encoder)
-        used in screenshooter (scope: child/screenshooter)
-    used in cleaner (scope: child/cleaner)
-    used in db_write (scope: child/cleaner + main)
-        used in cleaner (scope: child/cleaner)
-        used in main (scope: main)
-        used in scan_dir (scope: main)
-    used in scheduler (scope: child/scheduler)
+#     used in stream_copy (scope: child/encoder)
+#     used in concat (scope: child/encoder)
+#     used in wait_cpu (scope: child)
+#         used in encoder (scope: child/encoder)
+#         used in screenshooter (scope: child/screenshooter)
+#     used in cleaner (scope: child/cleaner)
+#     used in db_write (scope: child/cleaner + main)
+#         used in cleaner (scope: child/cleaner)
+#         used in main (scope: main)
+#         used in scan_dir (scope: main)
+#     used in scheduler (scope: child/scheduler)
 
-    scope: child
-        Should the work_end flag be captured, raise the EndExecution exception
-    """
-    if work_end:
-        raise EndExecution
+#     scope: child
+#         Should the work_end flag be captured, raise the EndExecution exception
+#     """
+#     if work_end:
+#         raise EndExecution
 
 
 class Ffprobe:
@@ -277,16 +275,18 @@ class Ffprobe:
 
     def poll_dumb(self):
         while self.p.poll() is None:
-            check_end_kill(self.p)
-            time.sleep(1)
+            Checker.is_end(self.p)
+            Checker.sleep(1)
         self.returncode = self.p.wait()
 
     def poll_stdout(self):
         chars = []
         reader = self.p.stdout
-        while self.p.poll() is None:
-            check_end_kill(self.p)
+        while True:
+            Checker.is_end(self.p)
             char = reader.read(1)
+            if char == b'':
+                break
             chars.append(char)
         self.stdout = b''.join(chars)
         self.returncode = self.p.wait()
@@ -336,10 +336,10 @@ class Ffmpeg(Ffprobe):
             t = time_zero
             percent = 1
         while self.p.poll() is None:
-            check_end_kill(self.p)
+            Checker.is_end(self.p)
             chars = []
             while True:
-                check_end_kill(self.p)
+                Checker.is_end(self.p)
                 char = reader.read(1)
                 if char in (b'\r', b''):
                     break
@@ -369,11 +369,17 @@ class Ffmpeg(Ffprobe):
                 self.p.kill()
                 break
         Ffmpeg.log.debug(f'Ended {self.p}')
-        m = reg_complete[stream_type].search(line)
+        m = reg_running.search(line)
         if m:
             s = int(m[1])
             if size_allow is not None and s >= size_allow:
                 inefficient = True
+        else:
+            m = reg_complete[stream_type].search(line)
+            if m:
+                s = int(m[1])
+                if size_allow is not None and s >= size_allow:
+                    inefficient = True
         if progress_bar is not None:
             progress_bar.set(1)
         self.returncode = self.p.wait()
@@ -459,9 +465,9 @@ def stream_copy(log, dir_work_sub, prefix, file_raw, stream_id, file_out, file_d
     )
     args = ('-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy)
     while Ffmpeg(args, null=True).poll_dumb():
-        check_end()
+        Checker.is_end()
         log.warning('Stream copy failed, trying that later')
-        time.sleep(5)
+        Checker.sleep(5)
     shutil.move(file_copy, file_out)
     log.info('Stream copy done')
     file_done.touch()
@@ -486,13 +492,13 @@ def concat(log, prefix, concat_list, file_out, file_done):
     )
     with file_list.open('w') as f:
         for file in concat_list:
-            check_end()
+            Checker.is_end()
             f.write(f'file {file}\n')
     args = ('-f', 'concat', '-safe', '0', '-i', file_list, '-c', 'copy', '-map', '0', '-y', file_concat)
     while Ffmpeg(args, null=True).poll_dumb():
-        check_end()
+        Checker.is_end()
         log.warning('Concating failed, trying that later')
-        time.sleep(5)
+        Checker.sleep(5)
     shutil.move(file_concat, file_out)
     log.info('Concating done')
     file_done.touch()
@@ -566,7 +572,7 @@ def wait_close(file_raw:pathlib.Path):
                 log.info(f'{file_raw} closed writing, continue scanning')
             break
         size_old = size_new
-        time.sleep(5)
+        Checker.sleep(5)
 
 
 def scan_dir(d: pathlib.Path):
@@ -579,14 +585,13 @@ def scan_dir(d: pathlib.Path):
         End when KeyboardException is captured
     """
     log_scanner.debug(f'Scanning {d}')
-    global db
     for i in d.iterdir():
         if i.is_dir():
             scan_dir(i)
-        elif i.is_file() and i not in db:
+        elif i.is_file() and i not in Database.dict():
             wait_close(i)
             db_entry = None
-            if i not in db:
+            if i not in Database.dict():
                 log_scanner.info(f'Discovered {i}')
                 try:
                     p = Ffprobe(('-show_format', '-show_streams', '-select_streams', 'V', '-of', 'json', i))
@@ -611,9 +616,7 @@ def scan_dir(d: pathlib.Path):
                                 db_entry = streams
                 except EndExecution:
                     return
-            with lock_db:
-                db[i] = db_entry
-    db_write()
+            Database.add(i, db_entry)
 
 
 # def delta_adder(file_check, stream_type, start, size_exist):
@@ -627,27 +630,6 @@ def scan_dir(d: pathlib.Path):
 #     time_delta, size_delta = get_duration_and_size(file_check, 0, stream_type)
 #     return start + time_delta, size_exist + size_delta
 
-
-def wait_cpu(log, lock, waitpool):
-    """Wait for CPU resource,
-
-    used in encoder (scope: child/encoder)
-    used in screenshooter (scope: child/screenshooter)
-
-    scope: child
-        The EndExecution exception could be raised by wait_end, we pass it as is
-    """
-    log.info('Waiting for CPU resources')
-    waiter = threading.Event()
-    log.debug(f'Waiting for {waiter} to be set')
-    check_end()
-    with lock:
-        check_end()
-        waitpool.append(waiter)
-    Pool.e.set()
-    waiter.wait()
-    check_end()
-    log.info('Waked up')
 
 def encoder(
     dir_work_sub: pathlib.Path,
@@ -699,7 +681,7 @@ def encoder(
             suffix = 0
             file_check = dir_work_sub / f'{prefix}_{suffix}.nut'
             while file_check.exists() and file_check.stat().st_size:
-                check_end()
+                Checker.is_end()
                 time_delta, size_delta = get_duration_and_size(file_check, 0, stream_type)
                 start += time_delta
                 size_exist += size_delta
@@ -719,7 +701,7 @@ def encoder(
                     log.debug(f'{len(frames)} frames found in {file_out}')
                     frame_last = 0
                     for frame_id, frame in enumerate(reversed(frames)):
-                        check_end()
+                        Checker.is_end()
                         if frame['key_frame']:
                             frame_last = len(frames) - frame_id - 1
                             break
@@ -758,22 +740,15 @@ def encoder(
                 log.info(f'Seems already finished, concating all failed parts')
                 concat(log, prefix, concat_list, file_out, file_done)
                 return
-        if stream_type == 'video':
-            if stream_type == 'archive':
-                waitpool = Pool.pool_264
-                lock = Pool.lock_264
-            else:
-                waitpool = Pool.pool_av1
-                lock = Pool.lock_av1
         # Real encoding happenes below
         if check_efficiency:
             size_allow = size_raw * 0.9 - size_exist
         args = args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_type, stream_width, stream_height)
         target_time = duration - start
         while True:
-            check_end()
+            Checker.is_end()
             if stream_type == 'video':
-                wait_cpu(log, lock, waitpool)
+                Pool.wait(log, encode_type)
             p = Ffmpeg(args)
             progress_bar = ProgressBar(log)
             if check_efficiency:
@@ -793,7 +768,7 @@ def encoder(
                 #CleanPrinter.print(f'{prompt_title} ended {file_done}')
                 break
             log.info(f'Transcode failed, returncode: {p.returncode}, retrying that later')
-            time.sleep(5)
+            Checker.sleep(5)
     except EndExecution:
         log.debug(f'Ending thread {threading.current_thread()}')
         return
@@ -808,9 +783,9 @@ def join(thread: threading.Thread):
     scope: child
         The EndExecution flag could be raised by check_end, we pass it as is
     """
-    check_end()
+    Checker.is_end()
     thread.join()
-    check_end()
+    Checker.is_end()
 
 
 def muxer(
@@ -841,7 +816,7 @@ def muxer(
         input_id = 0
         mappers = []
         for stream_id, stream in enumerate(streams):
-            check_end()
+            Checker.is_end()
             if stream is None:
                 mappers += ['-map', f'0:{stream_id}']
             else:
@@ -851,9 +826,9 @@ def muxer(
         log.info(f'Muxing to {file_out}...')
         args = (*inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_cache)
         while Ffmpeg(args, null=True).poll_dumb():
-            check_end()
+            Checker.is_end()
             log.warning(f'Muxing failed, retry that later')
-            time.sleep(5)
+            Checker.sleep(5)
     except EndExecution:
         log.debug(f'Ending thread {threading.current_thread()}')
         return
@@ -899,7 +874,7 @@ def screenshooter(
             height = stream_height * length
             if width > 65535 or length > 65535:
                 while width > 65535 or length > 65535:
-                    check_end()
+                    Checker.is_end()
                     width //= 2
                     length //= 2
                 arg_scale = f',scale={width}x{height}'
@@ -919,7 +894,7 @@ def screenshooter(
                 file_id = 0
                 for i in range(length):
                     for j in range(length):
-                        check_end()
+                        Checker.is_end()
                         args_input.extend(('-ss', str(time_start), '-i', file_raw))
                         args_mapper.append(f'[{file_id}:{stream_id}]')
                         args_position.append(f'{j*stream_width}_{i*stream_height}')
@@ -932,17 +907,17 @@ def screenshooter(
                 )
             prompt = f'Taking screenshot, {length}x{length} grid, for each {time_delta} segment, {width}x{height} res'
         while True:
-            wait_cpu(log, Pool.lock_ss, Pool.pool_ss)
+            Pool.wait(log, 'ss')
             log.info(prompt)
             if Ffmpeg(args, null=True).poll_dumb():
                 log.warning('Failed to screenshoot, retring that later')
             else:
                 break
-            time.sleep(5)
+            Checker.sleep(5)
     except EndExecution:
         log.debug(f'Ending thread {threading.current_thread()}')
         return
-    log.info('Screenshoot taken')
+    log.info('Screenshot taken')
     shutil.move(file_cache, file_out)
 
 
@@ -970,69 +945,99 @@ def cleaner(
         log.info(f'Cleaning input and {dir_work_sub}...')
         shutil.rmtree(dir_work_sub)
         file_raw.unlink()
-        check_end()
-        with lock_db:
-            check_end()
-            if file_raw in db:
-                del db[file_raw]
-                log_db.info(f'Removed {file_raw}')
-        db_write()
-        global work
-        check_end()
-        with lock_work:
-            check_end()
-            work.remove(file_raw)
+        Checker.is_end()
+        Database.remove(file_raw)
+        Pool.Work.remove(file_raw)
     except EndExecution:
         log.debug(f'Ending thread {threading.current_thread()}')
         return
     log.info('Done')
 
-def db_write():
-    """Write the db if it's updated
 
-    used in cleaner (scope: child/cleaner)
-    used in main (scope: main)
-    used in scan_dir (scope: main)
-    
-    scope: child
-        The EndExecution exception could be raised by wait_end, we pass it as is
-
-    scope: main
-        End when KeyboardException is captured
-    """
-    global db_last
-    check_end()
-    with lock_db:
-        check_end()
-        if db != db_last:
-            log_db.info('Updated')
-            check_end()
-            with open(file_db, 'wb') as f:
-                check_end()
-                pickle.dump(db, f)
-            log_db.info('Saved')
-            db_last = {i:j for i, j in db.items()}
-class Database:
-    lock = threading.Lock
-    log = LoggingWrapper('[Database]')
-    db = {}
-    file_db = pathlib.Path('db.pkl')
-    if file_db.exists():
-        with open(file_db, 'rb') as f:
-            db = pickle.load(f)
-        db_last = {i:j for i,j in db.items()}
+class Checker:
+    end_flag = False
+    @staticmethod
+    def is_end(p:subprocess.Popen=None):
+        if Checker.end_flag:
+            if p is not None:
+                p.kill()
+            raise EndExecution
 
     @staticmethod
+    def end():
+        Checker.end_flag = True
+
+    @staticmethod
+    def sleep(t:int=5):
+        while t:
+            Checker.is_end()
+            time.sleep(1)
+            t -= 1
+
+
+class Database:
+    lock = threading.RLock()
+    log = LoggingWrapper('[Database]')
+    db = {}
+    backend = ''
+    
+    @staticmethod
     def add(key, value):
-        with Database.Lock:
+        Checker.is_end()
+        with Database.lock:
+            Checker.is_end()
             if key not in Database.db:
                 Database.db[key] = value
+                Database.log.info(f'Added {key}')
+                Database.write()
 
     @staticmethod
     def remove(key):
+        Checker.is_end()
         with Database.lock:
+            Checker.is_end()
             if key in Database.db:
-                Database.db.remove(key)
+                del Database.db[key]
+                Database.log.info(f'Removed {key}')
+                Database.write()
+
+    @staticmethod
+    def dict():
+        """Return the database as dict, currently this just means return the db
+        """
+        return Database.db
+
+    @staticmethod
+    def read():
+        if Database.backend.exists():
+            Checker.is_end()
+            with open(Database.backend, 'rb') as f:
+                Checker.is_end()
+                Database.db = pickle.load(f)
+
+    @staticmethod       
+    def write():
+        """Write the db if it's updated
+
+        used in cleaner (scope: child/cleaner)
+        used in main (scope: main)
+        used in scan_dir (scope: main)
+        
+        scope: child
+            The EndExecution exception could be raised by wait_end, we pass it as is
+
+        scope: main
+            End when KeyboardException is captured
+        """
+        Checker.is_end()
+        with Database.lock:
+            Checker.is_end()
+            Database.log.info('Updated')
+            Checker.is_end()
+            with open(Database.backend, 'wb') as f:
+                Checker.is_end()
+                pickle.dump(Database.db, f)
+            Database.log.info('Saved')
 
     @staticmethod
     def clean():
@@ -1043,9 +1048,12 @@ class Database:
         scope: main
             End when KeyboardException is captured
         """
+        Checker.is_end()
         with Database.lock:
+            Checker.is_end()
             db_new = {}
             for i_r, j_r in {i:j for i, j in Database.db.items() if i.exists()}.items():
+                Checker.is_end()
                 name = f'{i_r.stem}.mkv'
                 finish = False
                 if (dir_archive / name).exists() and (dir_preview / name).exists():
@@ -1057,6 +1065,7 @@ class Database:
                         elif dir_screenshot_sub.is_dir():
                             finish = True
                             for stream_id, stream in enumerate(j_r):
+                                Checker.is_end()
                                 if stream is not None and stream['type'] == 'video':
                                     if not (dir_screenshot_sub / f'{i_r.stem}_{stream_id}.jpg').exists():
                                         finish = False
@@ -1066,21 +1075,28 @@ class Database:
                     Database.log.warning(f'Purged already finished video {i_r}')
                 else:
                     db_new[i_r] = j_r
-            Database.db = db_new
+            if Database.db != db_new:
+                Database.db = db_new
+                Database.write()
+        
 
 
 class Pool:
-    pool_264, pool_av1, pool_ss = ([] for i in range(3))
-    lock_264, lock_av1, lock_ss = (threading.Lock() for i in range(3))
+    pool_264, pool_av1, pool_ss, pool_work = ([] for i in range(4))
+    lock_264, lock_av1, lock_ss, lock_work = (threading.Lock() for i in range(4))
     cpu_percent = 0
     cpu_264 = 50
     cpu_av1 = 60
     cpu_ss = 90
     prompt_264 = 'Waked up an x264 encoder'
-    prompt_av1 = 'Waked up an x264 encoder'
-    prompt_ss = 'Waked up an screenshooter'
+    prompt_av1 = 'Waked up an av1 encoder'
+    prompt_ss = 'Waked up a screenshooter'
     log = LoggingWrapper('[Scheduler]')
     e = threading.Event()
+
+    @staticmethod
+    def wake():
+        Pool.e.set()
 
     @staticmethod
     def update_cpu_percent():
@@ -1090,13 +1106,64 @@ class Pool:
     @staticmethod
     def waker(pool, lock, cpu_need, prompt):
         while Pool.cpu_percent < cpu_need and pool:
-            check_end()
+            Checker.is_end()
             with lock:
-                check_end()
+                Checker.is_end()
                 pool.pop(0).set()
                 Pool.log.info(prompt)
-            time.sleep(5)
+            Checker.sleep(5)
             Pool.update_cpu_percent()
+
+    @staticmethod
+    def wait(log, style):
+        """Wait for CPU resource,
+
+        used in encoder (scope: child/encoder)
+        used in screenshooter (scope: child/screenshooter)
+
+        scope: child
+            The EndExecution exception could be raised by wait_end, we pass it as is
+        """
+        match style:
+            case '264' | 'archive':
+                lock = Pool.lock_264
+                pool = Pool.pool_264
+            case 'av1' | 'preview':
+                lock = Pool.lock_av1
+                pool = Pool.pool_av1
+            case 'ss' | 'screenshot':
+                lock = Pool.lock_ss
+                pool = Pool.pool_ss
+        log.info('Waiting for CPU resources')
+        waiter = threading.Event()
+        log.debug(f'Waiting for {waiter} to be set')
+        Checker.is_end()
+        with lock:
+            Checker.is_end()
+            pool.append(waiter)
+        Pool.e.set()
+        waiter.wait()
+        Checker.is_end()
+        log.info('Waked up')
+    
+
+    class Work:
+        @staticmethod
+        def add(entry):
+            with Pool.lock_work:
+                Pool.pool_work.append(entry)
+
+        @staticmethod
+        def remove(entry):
+            with Pool.lock_work:
+                Pool.pool_work.remove(entry)
+
+        @staticmethod
+        def query(entry):
+            with Pool.lock_work:
+                if entry in Pool.pool_work:
+                    return True
+            return False
 
     @staticmethod
     def scheduler():
@@ -1106,23 +1173,24 @@ class Pool:
                 with Pool.lock_264, Pool.lock_av1, Pool.lock_ss:
                     if not Pool.pool_264 and not Pool.pool_av1 and not Pool.pool_ss:
                         Pool.e.clear()
-                check_end()
+                Checker.is_end()
                 Pool.e.wait()
-                check_end()
-                time.sleep(5)
+                Checker.is_end()
+                Checker.sleep(5)
                 Pool.update_cpu_percent()
                 Pool.waker(Pool.pool_264, Pool.lock_264, Pool.cpu_264, Pool.prompt_264)
                 Pool.waker(Pool.pool_av1, Pool.lock_av1, Pool.cpu_av1, Pool.prompt_av1)
                 Pool.waker(Pool.pool_ss, Pool.lock_ss, Pool.cpu_ss, Pool.prompt_ss)
             except EndExecution:
                 break
-        Pool.log.warning('Work_end signal received, about to waking up all sleeping threads so they can end themselvies')
+        Pool.log.warning('Terminating, waking up all sleeping threads so they can end themselvies')
         for waitpool in Pool.pool_264, Pool.pool_av1, Pool.pool_ss:
             while waitpool:
                 waiter = waitpool.pop(0)
                 waiter.set()
                 Pool.log.debug(f'Emergency wakeup: {waiter}')
         Pool.log.debug(f'Ending thread {threading.current_thread()}')
+
 
 
 def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, stream_duration, stream_size, stream_lossless, stream_width, stream_height, streams, threads, amix=False):
@@ -1154,39 +1222,6 @@ def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, st
         threads[-1].start()
     return streams, threads
 
-def db_cleaner():
-    """Cleaning the db, remove files not existing or already finished
-
-    used in main (scope: main)
-    
-    scope: main
-        End when KeyboardException is captured
-    """
-    global db
-    with lock_db:
-        db_new = {}
-        for i_r, j_r in {i:j for i, j in db.items() if i.exists()}.items():
-            name = f'{i_r.stem}.mkv'
-            finish = False
-            if (dir_archive / name).exists() and (dir_preview / name).exists():
-                dir_screenshot_sub = dir_screenshot / f'{i_r.stem}'
-                if dir_screenshot_sub.exists():
-                    if dir_screenshot_sub.is_file():
-                        if i_r.exists():
-                            finish = True
-                    elif dir_screenshot_sub.is_dir():
-                        finish = True
-                        for stream_id, stream in enumerate(j_r):
-                            if stream is not None and stream['type'] == 'video':
-                                if not (dir_screenshot_sub / f'{i_r.stem}_{stream_id}.jpg').exists():
-                                    finish = False
-                                    break
-            if finish and i_r.exists():
-                i_r.unlink()
-                log_db.warning(f'Purged already finished video {i_r}')
-            else:
-                db_new[i_r] = j_r
-        db = db_new
 
 # The main function starts here
 if __name__ == '__main__':
@@ -1204,28 +1239,20 @@ if __name__ == '__main__':
         format='%(asctime)s %(levelname)s: %(message)s',
         level=logging.DEBUG
     )
-    lock_db, lock_work = (threading.Lock() for i in range(2))
-    db, db_last = ({} for i in range(2))
     work, dirs_work_sub = ([] for i in range(2))
     work_end = False
-    log_db = LoggingWrapper('[Database]')
+    Database.backend = dir_work / 'db.pkl'
+    Database.read()
     log_main = LoggingWrapper('[Main]')
     log_scanner = LoggingWrapper('[Scanner]')
     log_main.info('Started')
     threading.Thread(target = Pool.scheduler).start()
-    file_db = dir_work / 'db.pkl'
-    if file_db.exists():
-        with open(file_db, 'rb') as f:
-            db = pickle.load(f)
-        db_last = {i:j for i,j in db.items()}
-    #ffmpeg = Ffmpeg()
     try:
         while True:
-            db_cleaner()
-            db_write()
+            Database.clean()
             scan_dir(dir_raw)
-            for i, j in db.items():
-                if j is not None and i not in work:
+            for i, j in Database.dict().items():
+                if j is not None and not Pool.Work.query(i):
                     dir_work_sub = pathlib.Path(
                         dir_work,
                         i.stem
@@ -1297,7 +1324,7 @@ if __name__ == '__main__':
                             i, dir_work_sub / f'{i.stem}_archive.mkv', file_archive,
                             streams_archive, threads_archive
                         )))
-                        log_main.info(f'Spawned thread {threads_muxer[-1]}')
+                        log_main.debug(f'Spawned thread {threads_muxer[-1]}')
                         threads_muxer[-1].start()
                     if work_preview:
                         if audios:
@@ -1306,29 +1333,33 @@ if __name__ == '__main__':
                             i, dir_work_sub / f'{i.stem}_preview.mkv', file_preview,
                             streams_preview, threads_preview
                         )))
-                        log_main.info(f'Spawned thread {threads_muxer[-1]}')
+                        log_main.debug(f'Spawned thread {threads_muxer[-1]}')
                         threads_muxer[-1].start()
                     thread_cleaner = threading.Thread(target=cleaner, args=(dir_work_sub, i, threads_screenshot + threads_muxer))
-                    log_main.info(f'Spawned thread {thread_cleaner}')
+                    log_main.debug(f'Spawned thread {thread_cleaner}')
                     thread_cleaner.start()
-                    with lock_work:
-                        work.append(i)
+                    Pool.Work.add(i)
             time.sleep(5)
     except KeyboardInterrupt:
         log_main.warning('Keyboard Interrupt received, exiting safely...')
         for thread in threading.enumerate(): 
             log_main.debug(f'Alive thread before exiting: {thread.name}')
-        db_write()
-        Pool.e.set()
-        work_end = True
+        Database.write()
+        Pool.wake()
+        Checker.end()
         hint = False
+        wait = 0
         while threading.active_count() > 1:
             if not hint:
                 log_main.info(f'Waiting for other threads to end...')
                 for thread in threading.enumerate():
                     if thread != threading.current_thread():
                         log_main.debug(f'Waiting for thread to end: {thread}')
+            if wait <= 50:
+                time.sleep(0.1)
+                wait += 1
+            else:
+                time.sleep(5)
             hint = True
-            time.sleep(1)
         log_main.warning('Exiting...')
         log_main.debug(f'Ending thread {threading.current_thread()}')
