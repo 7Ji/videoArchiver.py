@@ -1,6 +1,7 @@
 if __name__ != '__main__':
     raise RuntimeError('REFUSED to be imported, you should only run this as sciprt! (i.e. python videoArchiver.py, or python -m videoArchiver) Most functions are heavily dependent on global variables only set in the main body to reduce memory usage. If you really want to test this as a module, you could capture this RuntimeError, but videoArchiver.py is not guaranteed to not fuck up your computer')
     
+from asyncio import threads
 import threading
 import subprocess
 import json
@@ -36,6 +37,7 @@ class CleanPrinter:
     """
 
     bars = 0
+    lock_bar = threading.Lock()
     width = shutil.get_terminal_size()[0]
 
     # @staticmethod
@@ -75,7 +77,7 @@ class CleanPrinter:
         
 
 
-def str_timedelta(timedelta: datetime.timedelta):
+def str_from_timedelta(timedelta: datetime.timedelta):
     """Convert a timedelta object to HH:MM:SS str
     """
     time = int(timedelta.total_seconds())
@@ -83,6 +85,9 @@ def str_timedelta(timedelta: datetime.timedelta):
     minutes, seconds = divmod(remainder, 60)
     return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
 
+
+def timedelta_from_str(t: str):
+    return datetime.timedelta(hours=int(t[:2]), minutes=int(t[3:5]), seconds=float(t[6:]))
 
 def clamp(n, minimum, maximum):
     return min(max(n, minimum), maximum)
@@ -92,22 +97,24 @@ class LoggingWrapper:
     """Wrapper for printing and logging, ease the pain to type prompt_title every time
     """
     def __init__(self, title='[Title]'):
+        if title[-1] != ' ':
+            title += ' '
         self.title = title
 
     def critical(self, content):
-        CleanPrinter.print(f'{self.title} {content}', loglevel=logging.CRITICAL)
+        CleanPrinter.print(f'{self.title}{content}', loglevel=logging.CRITICAL)
 
     def error(self, content):
-        CleanPrinter.print(f'{self.title} {content}', loglevel=logging.ERROR)
+        CleanPrinter.print(f'{self.title}{content}', loglevel=logging.ERROR)
 
     def warning(self, content):
-        CleanPrinter.print(f'{self.title} {content}', loglevel=logging.WARNING)
+        CleanPrinter.print(f'{self.title}{content}', loglevel=logging.WARNING)
 
     def info(self, content):
-        CleanPrinter.print(f'{self.title} {content}', loglevel=logging.INFO)
+        CleanPrinter.print(f'{self.title}{content}', loglevel=logging.INFO)
 
     def debug(self, content):
-        logging.debug(f'{self.title} {content}')
+        logging.debug(f'{self.title}{content}')
 
 
 
@@ -115,7 +122,8 @@ class ProgressBar(CleanPrinter):
     """Progress bar with title, percent, spent/estimate time
     """
     def __init__(self, log: LoggingWrapper = '[Title]'):
-        CleanPrinter.bars += 1
+        with CleanPrinter.lock_bar:
+            CleanPrinter.bars += 1
         # if title[-1] != ' ':
         #     title += ' '
         self.log = log
@@ -136,7 +144,8 @@ class ProgressBar(CleanPrinter):
     def display(self, update=False):
         if self.percent == 1:
             CleanPrinter.clear_line()
-            CleanPrinter.bars -= 1
+            with CleanPrinter.lock_bar:
+                CleanPrinter.bars -= 1
             self.log.debug('Encoder exited')
         else:
             width = shutil.get_terminal_size()[0]
@@ -173,10 +182,10 @@ class ProgressBar(CleanPrinter):
                 time_spent = datetime.datetime.today() - self.time_start
                 if time_spent - self.time_spent > time_second:
                     self.time_spent = time_spent
-                    self.time_spent_str = ' S:' + str_timedelta(time_spent)
+                    self.time_spent_str = ' S:' + str_from_timedelta(time_spent)
                     if self.display_estimate and self.percent != 0:
                         self.time_estimate = time_spent / self.percent - time_spent
-                        self.time_estimate_str = ' R:' + str_timedelta(self.time_estimate)
+                        self.time_estimate_str = ' R:' + str_from_timedelta(self.time_estimate)
                     if not update:
                         update = True
                 line.append(self.time_spent_str)
@@ -234,7 +243,7 @@ def check_end_kill(p:subprocess.Popen):
     """
     if work_end:
         p.kill()
-        logging.DEBUG(f'[Subprocess] Killed {p}')
+        logging.debug(f'[Subprocess] Killed {p}')
         raise EndExecution
 
 def check_end():
@@ -259,15 +268,38 @@ def check_end():
         raise EndExecution
 
 
-class Ffmpeg:
-    def __init__(self, path:pathlib.Path=None):
-        if path is None:
-            path = pathlib.Path(shutil.which('ffmpeg'))
-        self.path = path
-    def popen(self, args):
-        return subprocess.Popen((self.path, *args))
-    @staticmethod
-    def poll_dumb(p: subprocess.Popen):
+class Ffprobe:
+    path = pathlib.Path(shutil.which('ffprobe'))
+    log = LoggingWrapper('[Subprocess]')
+    def __init__(self, args):
+        self.p = subprocess.Popen((self.path, *args), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.poll_stdout()
+
+    def poll_dumb(self):
+        while self.p.poll() is None:
+            check_end_kill(self.p)
+            time.sleep(1)
+        self.returncode = self.p.wait()
+
+    def poll_stdout(self):
+        chars = []
+        reader = self.p.stdout
+        while self.p.poll() is None:
+            check_end_kill(self.p)
+            char = reader.read(1)
+            chars.append(char)
+        self.stdout = b''.join(chars)
+        self.returncode = self.p.wait()
+
+class Ffmpeg(Ffprobe):
+    path = pathlib.Path(shutil.which('ffmpeg'))
+    def __init__(self, args, null=False):
+        if null:
+            self.p = subprocess.Popen((self.path, *args), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            self.p = subprocess.Popen((self.path, *args), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+    def poll_dumb(self):
         """Polling the ffmpeg endlessly until it is done, do nothing other than trying to capture the work_end flag
 
         used in stream_copy (scope: child/encoder)
@@ -278,111 +310,80 @@ class Ffmpeg:
         scope: child
             The EndExecution exception could be raised by check_end_kill, we pass it as is
         """
-        while p.poll() is None:
-            check_end_kill(p)
-            time.sleep(1)
-        return p.wait()
+        super().poll_dumb()
+        return self.returncode
     
-    
-def ffmpeg_dumb_poller(p: subprocess.Popen):
-    """Polling the ffmpeg endlessly until it is done, do nothing other than trying to capture the work_end flag
+    def poll_time_size(self, stream_type:str, size_allow:int=None, progress_bar:ProgressBar=None, target_time:datetime.timedelta=None):
+        """Polling time and size information from a running ffmpeg subprocess.Popen
 
-    used in stream_copy (scope: child/encoder)
-    used in encoder (scope: child/endoer)
-    used in muxer (scope: child/muxer)
-    used in screenshooter (scopte: child/screenshooter)
-
-    scope: child
-        The EndExecution exception could be raised by check_end_kill, we pass it as is
-    """
-    while p.poll() is None:
-        check_end_kill(p)
-        time.sleep(1)
-    return p.wait()
-
-
-def ffmpeg_time_size_poller(p: subprocess.Popen, stream_type:str, size_allow:int=None, progress_bar:ProgressBar=None, target_time:datetime.timedelta=None):
-    """Polling time and size information from a running ffmpeg subprocess.Popen
-
-    used in encoder (scope: child/encoder)
-    used in get_duration_and_size (wrapper)
-        used in stream_info (scope: main)
-        used in delta_adder (scope: child/encoder)
         used in encoder (scope: child/encoder)
+        used in get_duration_and_size (wrapper)
+            used in stream_info (scope: main)
+            used in delta_adder (scope: child/encoder)
+            used in encoder (scope: child/encoder)
 
-    scope: main
-        End when KeyboardException is captured
-    scope: child
-        The EndExecution exception could be raised by check_end_kill, we pass it as is
-    """
-    log = LoggingWrapper('[Subprocess]')
-    log.debug(f'Started {p}')
-    if size_allow is not None:
-        inefficient = False
-    check_time = size_allow is None or (size_allow is not None and progress_bar is not None)
-    reader = p.stderr
-    if check_time:
-        t = time_zero
-        percent = 1
-    while p.poll() is None:
-        check_end_kill(p)
-        chars = []
-        while True:
-            check_end_kill(p)
-            char = reader.read(1)
-            if char in (b'\r', b''):
+        scope: main
+            End when KeyboardException is captured
+        scope: child
+            The EndExecution exception could be raised by check_end_kill, we pass it as is
+        """
+        Ffmpeg.log.debug(f'Started {self.p}')
+        if size_allow is not None:
+            inefficient = False
+        check_time = size_allow is None or (size_allow is not None and progress_bar is not None)
+        reader = self.p.stderr
+        if check_time:
+            t = time_zero
+            percent = 1
+        while self.p.poll() is None:
+            check_end_kill(self.p)
+            chars = []
+            while True:
+                check_end_kill(self.p)
+                char = reader.read(1)
+                if char in (b'\r', b''):
+                    break
+                elif char != b'\n':
+                    chars.append(char)
+            if chars:
+                line = b''.join(chars).decode('utf-8')
+                if check_time:
+                    m = reg_time.search(line)
+                    if m:
+                        t = m[1]
+                        if progress_bar is not None:
+                            t = timedelta_from_str(t)
+                            percent = t/target_time
+                            progress_bar.set_fraction(t, target_time)
+                if size_allow is not None:
+                    m = reg_running.search(line)
+                    if m:
+                        size_produded = int(m[1])
+                        if size_produded >= size_allow or (
+                            check_time and t > time_ten_seconds and size_produded/size_allow >= percent):
+                            inefficient = True
+                            self.p.kill()
+                            break
+                    pass
+            else:
+                self.p.kill()
                 break
-            elif char != b'\n':
-                chars.append(char)
-        if chars:
-            line = b''.join(chars).decode('utf-8')
-            if check_time:
-                m = reg_time.search(line)
-                if m:
-                    t = m[1]
-                    if progress_bar is not None:
-                        t = datetime.timedelta(
-                            hours = int(t[:2]),
-                            minutes = int(t[3:5]),
-                            seconds = float(t[6:])
-                        )
-                        percent = t/target_time
-                        progress_bar.set_fraction(t, target_time)
-            if size_allow is not None:
-                m = reg_running.search(line)
-                if m:
-                    size_produded = int(m[1])
-                    if size_produded >= size_allow or (
-                        check_time and t > time_ten_seconds and size_produded/size_allow >= percent):
-                        inefficient = True
-                        p.kill()
-                        break
-                pass
+        Ffmpeg.log.debug(f'Ended {self.p}')
+        m = reg_complete[stream_type].search(line)
+        if m:
+            s = int(m[1])
+            if size_allow is not None and s >= size_allow:
+                inefficient = True
+        if progress_bar is not None:
+            progress_bar.set(1)
+        self.returncode = self.p.wait()
+        if size_allow is None:
+            if progress_bar is None:
+                return self.returncode, timedelta_from_str(t), s
+            else:
+                return self.returncode, t, s
         else:
-            p.kill()
-            break
-    log.debug(f'Ended {p}')
-    m = reg_complete[stream_type].search(line)
-    if m:
-        s = int(m[1])
-        if size_allow is not None and s >= size_allow:
-            inefficient = True
-    if progress_bar is not None:
-        progress_bar.set(1)
-    if size_allow is None:
-        if progress_bar is None:
-            return \
-                p.wait(), \
-                datetime.timedelta(
-                    hours = int(t[:2]),
-                    minutes = int(t[3:5]),
-                    seconds = float(t[6:])
-                ), \
-                s
-        else:
-            return p.wait(), t, s
-    else:
-        return inefficient
+            return inefficient
 
 
 def get_duration_and_size(media: pathlib.Path, stream_id: int, stream_type: str):
@@ -397,9 +398,8 @@ def get_duration_and_size(media: pathlib.Path, stream_id: int, stream_type: str)
     scope: child
         The EndExecution exception could be raised by ffmpeg_time_size_poller, we pass it as is
     """
-    ffmpeg.popen('-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-')
-    p = subprocess.Popen(('ffmpeg', '-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    r, t, s = ffmpeg_time_size_poller(p, stream_type)
+    #ffmpeg.popen('-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-')
+    r, t, s = Ffmpeg(('-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), ).poll_time_size(stream_type)
     return t, s
 
 
@@ -411,6 +411,7 @@ def stream_info(file_raw, stream_id, stream_type, stream):
     scope: main
         End when KeyboardException is captured
     """
+    log_scanner.info(f'Getting stream information for stream {stream_id} from {file_raw}')
     duration, size = get_duration_and_size(file_raw, stream_id, stream_type)
     if stream_type == 'video':
         lossless = stream['codec_name'] in codec_vlo
@@ -456,8 +457,8 @@ def stream_copy(log, dir_work_sub, prefix, file_raw, stream_id, file_out, file_d
         dir_work_sub,
         f'{prefix}_copy.nut'
     )
-    args = ('ffmpeg', '-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy)
-    while ffmpeg_dumb_poller(subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)):
+    args = ('-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy)
+    while Ffmpeg(args, null=True).poll_dumb():
         check_end()
         log.warning('Stream copy failed, trying that later')
         time.sleep(5)
@@ -487,8 +488,8 @@ def concat(log, prefix, concat_list, file_out, file_done):
         for file in concat_list:
             check_end()
             f.write(f'file {file}\n')
-    args = ('ffmpeg', '-f', 'concat', '-safe', '0', '-i', file_list, '-c', 'copy', '-map', '0', '-y', file_concat)
-    while ffmpeg_dumb_poller(subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)):
+    args = ('-f', 'concat', '-safe', '0', '-i', file_list, '-c', 'copy', '-map', '0', '-y', file_concat)
+    while Ffmpeg(args, null=True).poll_dumb():
         check_end()
         log.warning('Concating failed, trying that later')
         time.sleep(5)
@@ -505,7 +506,7 @@ def args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_t
     scope: child
         No exception should be raised, the outer thread is ended by other things
     """
-    args_in = ('ffmpeg', '-hwaccel', 'auto', '-ss', str(start), '-i', file_raw)
+    args_in = ('-hwaccel', 'auto', '-ss', str(start), '-i', file_raw)
     args_map = ('-map', f'0:{stream_id}')
     args_out = ('-y', file_out)
     if stream_type == 'video':
@@ -587,26 +588,29 @@ def scan_dir(d: pathlib.Path):
             db_entry = None
             if i not in db:
                 log_scanner.info(f'Discovered {i}')
-                r = subprocess.run(('ffprobe', '-show_format', '-show_streams', '-select_streams', 'V', '-of', 'json', i), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                if r.returncode == 0:
-                    j = json.loads(r.stdout)
-                    j_format =  j['format']['format_name']
-                    if not (j_format.endswith('_pipe') or j_format in ('image2', 'tty')) and j['streams']:
-                        streams = []
-                        video = False
-                        for stream_id, s in enumerate(
-                            json.loads(subprocess.run(('ffprobe', '-show_streams', '-of', 'json', i), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout)['streams']
-                        ):
-                            if s['codec_type'] in ('video', 'audio'):
-                                if s['codec_type'] == 'video':
-                                    video = True
-                                streams.append(stream_info(i, stream_id, s['codec_type'], s))
-                            else:
-                                streams.append(None)
-                        if video:
-                            log_scanner.info(f'Added {i} to db, {len(streams)} streams')
-                            log_scanner.debug(f'{i} streams: {streams}')
-                            db_entry = streams
+                try:
+                    p = Ffprobe(('-show_format', '-show_streams', '-select_streams', 'V', '-of', 'json', i))
+                    if p.returncode == 0:
+                        j = json.loads(p.stdout)
+                        j_format =  j['format']['format_name']
+                        if not (j_format.endswith('_pipe') or j_format in ('image2', 'tty')) and j['streams']:
+                            streams = []
+                            video = False
+                            for s_id, s in enumerate(
+                                json.loads(Ffprobe(('-show_streams', '-of', 'json', i)).stdout)['streams']
+                            ):
+                                if s['codec_type'] in ('video', 'audio'):
+                                    if s['codec_type'] == 'video':
+                                        video = True
+                                    streams.append(stream_info(i, s_id, s['codec_type'], s))
+                                else:
+                                    streams.append(None)
+                            if video:
+                                log_scanner.info(f'Added {i} to db, {len(streams)} streams')
+                                log_scanner.debug(f'{i} streams: {streams}')
+                                db_entry = streams
+                except EndExecution:
+                    return
             with lock_db:
                 db[i] = db_entry
     db_write()
@@ -640,6 +644,7 @@ def wait_cpu(log, lock, waitpool):
     with lock:
         check_end()
         waitpool.append(waiter)
+    Pool.e.set()
     waiter.wait()
     check_end()
     log.info('Waked up')
@@ -686,7 +691,7 @@ def encoder(
         if file_out.exists() and file_out.stat().st_size:
             log.warning('Output already exists, potentially broken before, trying to recover it')
             time_delta, size_delta = get_duration_and_size(file_out, 0, stream_type)
-            log.debug(f'Recovery: {file_out}, duration: {time_delta}, size: {size_delta}')
+            log.debug(f'Recovery: {file_out}, duration: {time_delta}, size: {size_delta}kB')
             if abs(duration - time_delta) < time_second:
                 log.info('Last transcode successful, no need to transcode')
                 file_done.touch()
@@ -698,7 +703,7 @@ def encoder(
                 time_delta, size_delta = get_duration_and_size(file_check, 0, stream_type)
                 start += time_delta
                 size_exist += size_delta
-                log.warning(f'Recovery: {file_check}, duration: {time_delta}, size: {size_delta}. Total: duration:{start}, size{size_exist}')
+                log.warning(f'Recovery: {file_check}, duration: {time_delta}, size: {size_delta}kB. Total: duration:{start}, size: {size_exist}kB')
                 concat_list.append(file_check.name)
                 suffix += 1
                 file_check = dir_work_sub / f'{prefix}_{suffix}.nut'
@@ -707,8 +712,8 @@ def encoder(
             poll = False
             if stream_type == 'video':
                 log.info('Checking if the interrupt file is usable')
-                p = subprocess.Popen(('ffprobe', '-show_frames', '-select_streams', 'v:0', '-of', 'json', file_out), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-                if ffmpeg_dumb_poller(p) == 0:
+                p = Ffprobe(('-show_frames', '-select_streams', 'v:0', '-of', 'json', file_out))
+                if p.returncode == 0:
                     log.info('Analyzing available frames')
                     frames = json.loads(p.stdout)['frames']
                     log.debug(f'{len(frames)} frames found in {file_out}')
@@ -721,15 +726,15 @@ def encoder(
                     log.debug(f'Last GOP start at frame: {frame_last}')
                     if frame_last:
                         log.info(f'{frame_last} frames seem usable, trying to recovering those')
-                        p = subprocess.Popen(('ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', '-vframes', str(frame_last), file_recovery), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                         poll = True
+                        p = Ffmpeg(('-i', file_out, '-c', 'copy', '-map', '0', '-y', '-vframes', str(frame_last), file_recovery))
                     else:
                         log.info('No frames usable')
             else:
                 poll = True
-                p = subprocess.Popen(('ffmpeg', '-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                p = Ffmpeg(('-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery))
             if poll:
-                r, t, s = ffmpeg_time_size_poller(p, stream_type)
+                r, t, s = p.poll_time_size(stream_type)
                 if r:
                     log.warning('Recovery failed')
                 else:
@@ -755,13 +760,11 @@ def encoder(
                 return
         if stream_type == 'video':
             if stream_type == 'archive':
-                global waitpool_264
-                waitpool, lock = waitpool_264
-                lock = lock_264
+                waitpool = Pool.pool_264
+                lock = Pool.lock_264
             else:
-                global waitpool_av1
-                waitpool = waitpool_av1
-                lock = lock_av1
+                waitpool = Pool.pool_av1
+                lock = Pool.lock_av1
         # Real encoding happenes below
         if check_efficiency:
             size_allow = size_raw * 0.9 - size_exist
@@ -771,16 +774,16 @@ def encoder(
             check_end()
             if stream_type == 'video':
                 wait_cpu(log, lock, waitpool)
-            p = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            p = Ffmpeg(args)
             progress_bar = ProgressBar(log)
             if check_efficiency:
-                if ffmpeg_time_size_poller(p, stream_type, size_allow, progress_bar, target_time):  # return ture for inefficient
+                if p.poll_time_size(stream_type, size_allow, progress_bar, target_time):  # return ture for inefficient
                     stream_copy(log, dir_work_sub, prefix, file_raw, stream_id, file_out, file_done)
                     return
             else:
-                ffmpeg_time_size_poller(p, stream_type, progress_bar=progress_bar, target_time=target_time)
+                p.poll_time_size(stream_type, progress_bar=progress_bar, target_time=target_time)
             #CleanPrinter.print(f'{prompt_title} waiting to end')
-            if p.wait() == 0:
+            if p.returncode == 0:
                 if concat_list:
                     concat_list.append(file_out.name)
                     concat(log, prefix, concat_list, file_out, file_done)
@@ -789,9 +792,10 @@ def encoder(
                     file_done.touch()
                 #CleanPrinter.print(f'{prompt_title} ended {file_done}')
                 break
-            log.info(f'Transcode failed, returncode: {p.wait()}, retrying that later')
+            log.info(f'Transcode failed, returncode: {p.returncode}, retrying that later')
             time.sleep(5)
     except EndExecution:
+        log.warning(f'Ending thread {threading.current_thread()}')
         return
 
 
@@ -828,6 +832,7 @@ def muxer(
 
         Should that, return to end this thread
     """
+    log = LoggingWrapper(f'[{file_raw.name}]')
     try:
         if threads is not None and threads:
             for thread in threads:
@@ -843,16 +848,17 @@ def muxer(
                 inputs += ['-i', stream]
                 input_id += 1
                 mappers += ['-map', f'{input_id}']
-        CleanPrinter.print(f'[{file_raw.name}] Muxing to {file_out}...')
-        args = ('ffmpeg', *inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_cache)
-        while ffmpeg_dumb_poller(subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)):
+        log.info(f'Muxing to {file_out}...')
+        args = (*inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_cache)
+        while Ffmpeg(args, null=True).poll_dumb():
             check_end()
-            CleanPrinter.print(f'[{file_raw.name}] Muxing failed, retry that later')
+            log.warning(f'Muxing failed, retry that later')
             time.sleep(5)
     except EndExecution:
+        log.warning(f'Ending thread {threading.current_thread()}')
         return
     shutil.move(file_cache, file_out)
-    CleanPrinter.print(f'[{file_raw.name}] Muxed to {file_out}')
+    log.info(f'Muxed to {file_out}')
 
 
 def screenshooter(
@@ -878,12 +884,12 @@ def screenshooter(
         Should that, return to end this thread
     """
     try:
-        args_ffmpeg = ('ffmpeg', '-hwaccel', 'auto')
+        args_hwaccel = ('-hwaccel', 'auto')
         args_out = ('-vsync', 'passthrough', '-frames:v', '1', '-y', file_cache)
         length = clamp(int(math.log(duration.total_seconds()/2 + 1)), 1, 10)
         if length == 1:
             log = LoggingWrapper(f'[{file_raw.name}]')
-            args = (*args_ffmpeg, '-ss', str(duration/2), '-i', file_raw, '-map', f'0:{stream_id}', *args_out)
+            args = (*args_hwaccel, '-ss', str(duration/2), '-i', file_raw, '-map', f'0:{stream_id}', *args_out)
             prompt = 'Taking screenshot, single frame'
         else:
             log = LoggingWrapper(f'[{file_raw.name}] S:{stream_id}')
@@ -903,7 +909,7 @@ def screenshooter(
             time_delta = duration / tiles
             if duration < datetime.timedelta(seconds=tiles*5):
                 args = (
-                    *args_ffmpeg, '-i', file_raw, '-map', f'0:{stream_id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta.total_seconds()}),tile={length}x{length}{arg_scale}', *args_out
+                    *args_hwaccel, '-i', file_raw, '-map', f'0:{stream_id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta.total_seconds()}),tile={length}x{length}{arg_scale}', *args_out
                 )
             else:
                 time_start = time_zero
@@ -922,19 +928,19 @@ def screenshooter(
                 arg_mapper = ''.join(args_mapper)
                 arg_position = '|'.join(args_position)
                 args = (
-                    *args_ffmpeg, *args_input, '-filter_complex', f'{arg_mapper}xstack=inputs={tiles}:layout={arg_position}{arg_scale}', *args_out
+                    *args_hwaccel, *args_input, '-filter_complex', f'{arg_mapper}xstack=inputs={tiles}:layout={arg_position}{arg_scale}', *args_out
                 )
             prompt = f'Taking screenshot, {length}x{length} grid, for each {time_delta} segment, {width}x{height} res'
-        global waitpool_ss
         while True:
-            wait_cpu(log, lock_ss, waitpool_ss)
+            wait_cpu(log, Pool.lock_ss, Pool.pool_ss)
             log.info(prompt)
-            if ffmpeg_dumb_poller(subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)):
+            if Ffmpeg(args, null=True).poll_dumb():
                 log.warning('Failed to screenshoot, retring that later')
             else:
                 break
             time.sleep(5)
     except EndExecution:
+        log.warning(f'Ending thread {threading.current_thread()}')
         return
     log.info('Screenshoot taken')
     shutil.move(file_cache, file_out)
@@ -977,6 +983,7 @@ def cleaner(
             check_end()
             work.remove(file_raw)
     except EndExecution:
+        log.warning(f'Ending thread {threading.current_thread()}')
         return
     log.info('Done')
 
@@ -1007,118 +1014,61 @@ def db_write():
             db_last = {i:j for i, j in db.items()}
 
 
-def getcpu_usage(log):
-    cpu_percent = psutil.cpu_percent()
-    log.debug(f'CPU usage: {cpu_percent}')
-    return cpu_percent
-
 class Pool:
-    waits = 0
-
-    p_264, p_av1, p_ss = ([] for i in range(3))
-    l_264, l_av1, l_ss = (threading.Lock() for i in range(3))
-
+    pool_264, pool_av1, pool_ss = ([] for i in range(3))
+    lock_264, lock_av1, lock_ss = (threading.Lock() for i in range(3))
+    cpu_percent = 0
+    cpu_264 = 50
+    cpu_av1 = 60
+    cpu_ss = 90
+    prompt_264 = 'Waked up an x264 encoder'
+    prompt_av1 = 'Waked up an x264 encoder'
+    prompt_ss = 'Waked up an screenshooter'
+    log = LoggingWrapper('[Scheduler]')
     e = threading.Event()
 
     @staticmethod
+    def update_cpu_percent():
+        Pool.cpu_percent = psutil.cpu_percent()
+        Pool.log.debug(f'CPU usage: {Pool.cpu_percent}')
+
+    @staticmethod
+    def waker(pool, lock, cpu_need, prompt):
+        while Pool.cpu_percent < cpu_need and pool:
+            check_end()
+            with lock:
+                check_end()
+                pool.pop(0).set()
+                Pool.log.info(prompt)
+            time.sleep(5)
+            Pool.update_cpu_percent()
+
+    @staticmethod
     def scheduler():
-        log = LoggingWrapper('[Scheduler]')
-        log.info('Started')
+        Pool.log.info('Started')
         while not work_end:
-            if not Pool.p_264 and not Pool.p_av1 and not Pool.p_ss:
-                Pool.e.clear()
-            Pool.e.wait()
-            cpu_percent = getcpu_usage(log)
             try:
-                while cpu_percent < 50 and Pool.p_264:
-                    check_end()
-                    with Pool.l_264:
-                        check_end()
-                        Pool.p_264.pop(0).set()
-                        log.info('Waked up an x264 encoder')
-                    time.sleep(5)
-                    cpu_percent = getcpu_usage(log)
-                while cpu_percent < 60 and Pool.p_av1:
-                    check_end()
-                    with Pool.l_av1:
-                        check_end()
-                        Pool.p_av1.pop(0).set()
-                        log.info('Waked up an AV1 encoder')
-                    time.sleep(5)
-                    cpu_percent = getcpu_usage(log)
-                while cpu_percent < 90 and Pool.p_ss:
-                    check_end()
-                    with Pool.l_ss:
-                        check_end()
-                        Pool.p_ss.pop(0).set()
-                        log.info('Waked up an screenshooter')
-                    time.sleep(5)
-                    cpu_percent = getcpu_usage(log)
+                with Pool.lock_264, Pool.lock_av1, Pool.lock_ss:
+                    if not Pool.pool_264 and not Pool.pool_av1 and not Pool.pool_ss:
+                        Pool.e.clear()
+                check_end()
+                Pool.e.wait()
+                check_end()
+                time.sleep(5)
+                Pool.update_cpu_percent()
+                Pool.waker(Pool.pool_264, Pool.lock_264, Pool.cpu_264, Pool.prompt_264)
+                Pool.waker(Pool.pool_av1, Pool.lock_av1, Pool.cpu_av1, Pool.prompt_av1)
+                Pool.waker(Pool.pool_ss, Pool.lock_ss, Pool.cpu_ss, Pool.prompt_ss)
             except EndExecution:
                 break
-            time.sleep(5)
-        log.warning('Work_end signal received, about to waking up all sleeping threads so they can end themselvies')
-        for waitpool in waitpool_264, waitpool_av1, waitpool_ss:
+        Pool.log.warning('Work_end signal received, about to waking up all sleeping threads so they can end themselvies')
+        for waitpool in Pool.pool_264, Pool.pool_av1, Pool.pool_ss:
             while waitpool:
                 waiter = waitpool.pop(0)
                 waiter.set()
-                log.debug(f'Emergency wakeup: {waiter}')
-        log.info('Exited')
+                Pool.log.debug(f'Emergency wakeup: {waiter}')
+        Pool.log.warning(f'Ending thread {threading.current_thread()}')
 
-
-# def scheduler():
-#     """Schedule the CPU resource and wake up the sleeping threads if promising CPU resource is available
-
-#     scheduler itself (scope: child/scheduler)
-
-#     scope: child-main
-#         As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
-#             check_end
-
-#         Should that, or the end_work flag be captured, end CPU resource polling and wake up all sleeping threads so they can capture the end_work flag and end their work.
-#     """
-#     global waitpool_264
-#     global waitpool_av1
-#     global work_end
-#     log = LoggingWrapper('[Scheduler]')
-#     log.info('Started')
-#     while not work_end:
-#         cpu_percent = getcpu_usage(log)
-#         try:
-#             while cpu_percent < 50 and waitpool_264:
-#                 check_end()
-#                 with lock_264:
-#                     check_end()
-#                     waitpool_264.pop(0).set()
-#                     log.info('Waked up an x264 encoder')
-#                 time.sleep(5)
-#                 cpu_percent = getcpu_usage(log)
-#             while cpu_percent < 60 and waitpool_av1:
-#                 check_end()
-#                 with lock_av1:
-#                     check_end()
-#                     waitpool_av1.pop(0).set()
-#                     log.info('Waked up an AV1 encoder')
-#                 time.sleep(5)
-#                 cpu_percent = getcpu_usage(log)
-#             while cpu_percent < 90 and waitpool_ss:
-#                 check_end()
-#                 with lock_ss:
-#                     check_end()
-#                     waitpool_ss.pop(0).set()
-#                     log.info('Waked up an screenshooter')
-#                 time.sleep(5)
-#                 cpu_percent = getcpu_usage(log)
-#         except EndExecution:
-#             break
-#         time.sleep(5)
-#     log.warning('Work_end signal received, about to waking up all sleeping threads so they can end themselvies')
-#     for waitpool in waitpool_264, waitpool_av1, waitpool_ss:
-#         while waitpool:
-#             waiter = waitpool.pop(0)
-#             waiter.set()
-#             log.debug(f'Emergency wakeup: {waiter}')
-#     log.info('Exited')
 
 def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, stream_duration, stream_size, stream_lossless, stream_width, stream_height, streams, threads, amix=False):
     """Add a certainer encoder thread to threads, and start it just then.
@@ -1193,27 +1143,26 @@ if __name__ == '__main__':
     for dir in ( dir_raw, dir_archive, dir_preview, dir_screenshot, dir_work, dir_log):
         if not dir.exists():
             dir.mkdir()
-    file_db = dir_work / 'db.pkl'
-    if file_db.exists():
-        with open(file_db, 'rb') as f:
-            db = pickle.load(f)
-        db_last = {i:j for i,j in db.items()}
     logging.basicConfig(
         filename=dir_log / f'{datetime.datetime.today().strftime("%Y%m%d_%H%M%S")}.log', 
         format='%(asctime)s %(levelname)s: %(message)s',
         level=logging.DEBUG
     )
-    waitpool_264, waitpool_av1, waitpool_ss =  ([] for i in range(3))
-    lock_264, lock_av1, lock_ss, lock_db, lock_work = (threading.Lock() for i in range(5))
+    lock_db, lock_work = (threading.Lock() for i in range(2))
     db, db_last = ({} for i in range(2))
     work, dirs_work_sub = ([] for i in range(2))
     work_end = False
-    threading.Thread(target = scheduler).start()
     log_db = LoggingWrapper('[Database]')
     log_main = LoggingWrapper('[Main]')
     log_scanner = LoggingWrapper('[Scanner]')
-    ffmpeg = Ffmpeg()
-
+    log_main.info('Started')
+    threading.Thread(target = Pool.scheduler).start()
+    file_db = dir_work / 'db.pkl'
+    if file_db.exists():
+        with open(file_db, 'rb') as f:
+            db = pickle.load(f)
+        db_last = {i:j for i,j in db.items()}
+    #ffmpeg = Ffmpeg()
     try:
         while True:
             db_cleaner()
@@ -1305,5 +1254,18 @@ if __name__ == '__main__':
             time.sleep(5)
     except KeyboardInterrupt:
         log_main.warning('Keyboard Interrupt received, exiting safely...')
+        for thread in threading.enumerate(): 
+            log_main.debug(f'Alive thread before exiting: {thread.name}')
         db_write()
+        Pool.e.set()
         work_end = True
+        hint = False
+        while threading.active_count() > 1:
+            if not hint:
+                log_main.info(f'Waiting for other threads to end...')
+                for thread in threading.enumerate():
+                    if thread != threading.current_thread():
+                        log_main.warning(f'Waiting for thread to end: {thread}')
+            hint = True
+            time.sleep(1)
+        log_main.warning(f'Ending thread {threading.current_thread()}')
