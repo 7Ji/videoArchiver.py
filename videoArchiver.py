@@ -795,7 +795,7 @@ def encoder(
             log.info(f'Transcode failed, returncode: {p.returncode}, retrying that later')
             time.sleep(5)
     except EndExecution:
-        log.warning(f'Ending thread {threading.current_thread()}')
+        log.debug(f'Ending thread {threading.current_thread()}')
         return
 
 
@@ -855,7 +855,7 @@ def muxer(
             log.warning(f'Muxing failed, retry that later')
             time.sleep(5)
     except EndExecution:
-        log.warning(f'Ending thread {threading.current_thread()}')
+        log.debug(f'Ending thread {threading.current_thread()}')
         return
     shutil.move(file_cache, file_out)
     log.info(f'Muxed to {file_out}')
@@ -940,7 +940,7 @@ def screenshooter(
                 break
             time.sleep(5)
     except EndExecution:
-        log.warning(f'Ending thread {threading.current_thread()}')
+        log.debug(f'Ending thread {threading.current_thread()}')
         return
     log.info('Screenshoot taken')
     shutil.move(file_cache, file_out)
@@ -983,7 +983,7 @@ def cleaner(
             check_end()
             work.remove(file_raw)
     except EndExecution:
-        log.warning(f'Ending thread {threading.current_thread()}')
+        log.debug(f'Ending thread {threading.current_thread()}')
         return
     log.info('Done')
 
@@ -1012,6 +1012,61 @@ def db_write():
                 pickle.dump(db, f)
             log_db.info('Saved')
             db_last = {i:j for i, j in db.items()}
+class Database:
+    lock = threading.Lock
+    log = LoggingWrapper('[Database]')
+    db = {}
+    file_db = pathlib.Path('db.pkl')
+    if file_db.exists():
+        with open(file_db, 'rb') as f:
+            db = pickle.load(f)
+        db_last = {i:j for i,j in db.items()}
+
+    @staticmethod
+    def add(key, value):
+        with Database.Lock:
+            if key not in Database.db:
+                Database.db[key] = value
+
+    @staticmethod
+    def remove(key):
+        with Database.lock:
+            if key in Database.db:
+                Database.db.remove(key)
+
+    @staticmethod
+    def clean():
+        """Cleaning the db, remove files not existing or already finished
+
+        used in main (scope: main)
+        
+        scope: main
+            End when KeyboardException is captured
+        """
+        with Database.lock:
+            db_new = {}
+            for i_r, j_r in {i:j for i, j in Database.db.items() if i.exists()}.items():
+                name = f'{i_r.stem}.mkv'
+                finish = False
+                if (dir_archive / name).exists() and (dir_preview / name).exists():
+                    dir_screenshot_sub = dir_screenshot / f'{i_r.stem}'
+                    if dir_screenshot_sub.exists():
+                        if dir_screenshot_sub.is_file():
+                            if i_r.exists():
+                                finish = True
+                        elif dir_screenshot_sub.is_dir():
+                            finish = True
+                            for stream_id, stream in enumerate(j_r):
+                                if stream is not None and stream['type'] == 'video':
+                                    if not (dir_screenshot_sub / f'{i_r.stem}_{stream_id}.jpg').exists():
+                                        finish = False
+                                        break
+                if finish and i_r.exists():
+                    i_r.unlink()
+                    Database.log.warning(f'Purged already finished video {i_r}')
+                else:
+                    db_new[i_r] = j_r
+            Database.db = db_new
 
 
 class Pool:
@@ -1067,7 +1122,7 @@ class Pool:
                 waiter = waitpool.pop(0)
                 waiter.set()
                 Pool.log.debug(f'Emergency wakeup: {waiter}')
-        Pool.log.warning(f'Ending thread {threading.current_thread()}')
+        Pool.log.debug(f'Ending thread {threading.current_thread()}')
 
 
 def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, stream_duration, stream_size, stream_lossless, stream_width, stream_height, streams, threads, amix=False):
@@ -1095,6 +1150,7 @@ def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, st
             stream_id, stream_type, stream_duration, stream_size, stream_lossless,
             stream_width, stream_height
         )))
+        log_main.debug(f'Spawned thread {threads[-1]}')
         threads[-1].start()
     return streams, threads
 
@@ -1223,6 +1279,7 @@ if __name__ == '__main__':
                         stream_id, stream = next(iter(videos.items()))
                         if not file_screenshot.exists():
                             threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot.jpg', file_screenshot, stream_id, stream['duration'], stream['width'], stream['height'], stream['rotation'])))
+                            log_main.debug(f'Spawned thread {threads_screenshot[-1]}')
                             threads_screenshot[-1].start()
                     else:
                         dir_screenshot_sub = dir_screenshot / i.stem
@@ -1232,6 +1289,7 @@ if __name__ == '__main__':
                             file_screenshot = dir_screenshot_sub / f'{i.stem}_{i_r}.jpg'
                             if not file_screenshot.exists():
                                 threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot_{i_r}.jpg', file_screenshot, i_r, j_r['duration'], j_r['width'], j_r['height'], j_r['rotation'])))
+                                log_main.debug(f'Spawned thread {threads_screenshot[-1]}')
                                 threads_screenshot[-1].start()
                     threads_muxer = []
                     if work_archive:
@@ -1239,6 +1297,7 @@ if __name__ == '__main__':
                             i, dir_work_sub / f'{i.stem}_archive.mkv', file_archive,
                             streams_archive, threads_archive
                         )))
+                        log_main.info(f'Spawned thread {threads_muxer[-1]}')
                         threads_muxer[-1].start()
                     if work_preview:
                         if audios:
@@ -1247,8 +1306,11 @@ if __name__ == '__main__':
                             i, dir_work_sub / f'{i.stem}_preview.mkv', file_preview,
                             streams_preview, threads_preview
                         )))
+                        log_main.info(f'Spawned thread {threads_muxer[-1]}')
                         threads_muxer[-1].start()
-                    threading.Thread(target=cleaner, args=(dir_work_sub, i, threads_screenshot + threads_muxer)).start()
+                    thread_cleaner = threading.Thread(target=cleaner, args=(dir_work_sub, i, threads_screenshot + threads_muxer))
+                    log_main.info(f'Spawned thread {thread_cleaner}')
+                    thread_cleaner.start()
                     with lock_work:
                         work.append(i)
             time.sleep(5)
@@ -1265,7 +1327,8 @@ if __name__ == '__main__':
                 log_main.info(f'Waiting for other threads to end...')
                 for thread in threading.enumerate():
                     if thread != threading.current_thread():
-                        log_main.warning(f'Waiting for thread to end: {thread}')
+                        log_main.debug(f'Waiting for thread to end: {thread}')
             hint = True
             time.sleep(1)
-        log_main.warning(f'Ending thread {threading.current_thread()}')
+        log_main.warning('Exiting...')
+        log_main.debug(f'Ending thread {threading.current_thread()}')
