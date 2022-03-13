@@ -16,17 +16,8 @@ import math
 import logging
 
 
-codec_vlo = ('012v', '8bps', 'aasc', 'alias_pix', 'apng', 'avrp', 'avui', 'ayuv', 'bitpacked', 'bmp', 'bmv_video', 'brender_pix', 'cdtoons', 'cllc', 'cscd', 'dpx', 'dxa', 'dxtory', 'ffv1', 'ffvhuff', 'fits', 'flashsv', 'flic', 'fmvc', 'fraps', 'frwu', 'gif', 'huffyuv', 'hymt', 'lagarith', 'ljpeg', 'loco', 'm101', 'magicyuv', 'mscc', 'msp2', 'msrle', 'mszh', 'mwsc', 'pam', 'pbm', 'pcx', 'pfm', 'pgm', 'pgmyuv', 'pgx', 'png', 'ppm', 'psd', 'qdraw', 'qtrle', 'r10k', 'r210', 'rawvideo', 'rscc', 'screenpresso', 'sgi', 'sgirle', 'sheervideo', 'srgc', 'sunrast', 'svg', 'targa', 'targa_y216', 'tiff', 'tscc', 'utvideo', 'v210', 'v210x', 'v308', 'v408', 'v410', 'vble', 'vmnc', 'wcmv', 'wrapped_avframe', 'xbm', 'xpm', 'xwd', 'y41p', 'ylc', 'yuv4', 'zerocodec', 'zlib', 'zmbv')
-codec_alo = ('alac', 'ape', 'atrac3al', 'atrac3pal', 'dst', 'flac', 'mlp', 'mp4als', 'pcm_bluray', 'pcm_dvd', 'pcm_f16le', 'pcm_f24le', 'pcm_f32be', 'pcm_f32le', 'pcm_f64be', 'pcm_f64le', 'pcm_lxf', 'pcm_s16be', 'pcm_s16be_planar', 'pcm_s16le', 'pcm_s16le_planar', 'pcm_s24be', 'pcm_s24daud', 'pcm_s24le', 'pcm_s24le_planar', 'pcm_s32be', 'pcm_s32le', 'pcm_s32le_planar', 'pcm_s64be', 'pcm_s64le', 'pcm_s8', 'pcm_s8_planar', 'pcm_sga', 'pcm_u16be', 'pcm_u16le', 'pcm_u24be', 'pcm_u24le', 'pcm_u32be', 'pcm_u32le', 'pcm_u8', 'ralf', 's302m', 'shorten', 'tak', 'truehd', 'tta', 'wmalossless')
-reg_complete = {
-    'video': re.compile(r'video:(\d+)kB'),
-    'audio': re.compile(r'audio:(\d+)kB')
-}
-reg_running = re.compile(r'size= *(\d+)kB')
-reg_time = re.compile(r' time=([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{2}) ')
 time_zero = datetime.timedelta()
 time_second = datetime.timedelta(seconds=1)
-time_ten_seconds = datetime.timedelta(seconds=10)
 
 class EndExecution(RuntimeError):
     pass
@@ -76,22 +67,81 @@ class CleanPrinter:
                 pass
         
 
+class Duration:
+    def __init__(self, time):
+        self.update(time)
 
-def str_from_timedelta(timedelta: datetime.timedelta):
-    """Convert a timedelta object to HH:MM:SS str
-    """
-    time = int(timedelta.total_seconds())
-    hours, remainder = divmod(time, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+    def update(self, time: str | int | float):
+        if isinstance(time, str):
+            self.time = int(time[:2]) * 3600 + int(time[3:5]) * 60 + float(time[6:])
+        elif isinstance(time, int | float):
+            self.time = time
+        else:
+            raise ValueError(f'Can not initialize a Duration object with {type(time)}')
 
+    def __str__(self):
+        time = int(self.time)
+        hours, remainder = divmod(time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
 
-def timedelta_from_str(t: str):
-    return datetime.timedelta(hours=int(t[:2]), minutes=int(t[3:5]), seconds=float(t[6:]))
+    def __int__(self):
+        return int(self.time)
+
+    def __float__(self):
+        return float(self.time)
+
+    def __round__(self, ndigits = None):
+        return Duration(round(self.time, ndigits))
+
+    def __add__(self, other:  int | float | str):
+        if isinstance(other, Duration):
+            return Duration(self.time + other.time)
+        elif isinstance(other, int | float):
+            return Duration(self.time + other)
+        elif isinstance(other, str):
+            return Duration(self.time + Duration(other).time)
+        else:
+            raise ValueError(f'Can not add Duration with {type(other)}')
+
+    def __sub__(self, other):
+        if isinstance(other, Duration):
+            return Duration(self.time - other.time)
+        elif isinstance(other, int | float):
+            return Duration(self.time - other)
+        elif isinstance(other, str):
+            return Duration(self.time - Duration(other).time)
+        else:
+            raise ValueError(f'Can not subtract Duration with {type(other)}')
+
+    def __mul__(self, other: int | float):
+        if isinstance(other, int | float):
+            return Duration(self.time * other)
+        else:
+            raise ValueError(f'Can not multiply Duration with {type(other)}')
+
+    def __truediv__(self, other: int | float):
+        if isinstance(other, int | float):
+            return Duration(self.time / other)
+        else:
+            raise ValueError(f'Can not divide Duration with {type(other)}')
+
+    def __floordiv__(self, other: int | float):
+        if isinstance(other, int | float):
+            return Duration(self.time // other)
+        else:
+            raise ValueError(f'Can not divide Duration with {type(other)}')
+
+    def __divmod__(self, other: int | float):
+        if isinstance(other, int | float):
+            time, remainder = divmod(self.time, other)
+            return Duration(time), Duration(remainder)
+        else:
+            raise ValueError(f'Can not divide Duration with {type(other)}')
+
 
 def clamp(n, minimum, maximum):
     return min(max(n, minimum), maximum)
-
 
 class LoggingWrapper:
     """Wrapper for printing and logging, ease the pain to type prompt_title every time
@@ -180,10 +230,10 @@ class ProgressBar(CleanPrinter):
                 time_spent = datetime.datetime.today() - self.time_start
                 if time_spent - self.time_spent > time_second:
                     self.time_spent = time_spent
-                    self.time_spent_str = ' S:' + str_from_timedelta(time_spent)
+                    self.time_spent_str = ' S:' + str_from_time(time_spent)
                     if self.display_estimate and self.percent != 0:
                         self.time_estimate = time_spent / self.percent - time_spent
-                        self.time_estimate_str = ' R:' + str_from_timedelta(self.time_estimate)
+                        self.time_estimate_str = ' R:' + str_from_time(self.time_estimate)
                     if not update:
                         update = True
                 line.append(self.time_spent_str)
@@ -291,8 +341,17 @@ class Ffprobe:
         self.stdout = b''.join(chars)
         self.returncode = self.p.wait()
 
-class Ffmpeg(Ffprobe):
+class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3 h264 encoding work
+
     path = pathlib.Path(shutil.which('ffmpeg'))
+    reg_complete = {
+        'video': re.compile(r'video:(\d+)kB'),
+        'audio': re.compile(r'audio:(\d+)kB')
+    }
+    reg_running = re.compile(r'size= *(\d+)kB')
+    reg_time = re.compile(r' time=([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{2}) ')
+    time_ten_seconds = datetime.timedelta(seconds=10)
+
     def __init__(self, args, null=False):
         if null:
             self.p = subprocess.Popen((self.path, *args), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -348,19 +407,19 @@ class Ffmpeg(Ffprobe):
             if chars:
                 line = b''.join(chars).decode('utf-8')
                 if check_time:
-                    m = reg_time.search(line)
+                    m = Ffmpeg.reg_time.search(line)
                     if m:
                         t = m[1]
                         if progress_bar is not None:
-                            t = timedelta_from_str(t)
+                            t = time_from_str(t)
                             percent = t/target_time
                             progress_bar.set_fraction(t, target_time)
                 if size_allow is not None:
-                    m = reg_running.search(line)
+                    m = Ffmpeg.reg_running.search(line)
                     if m:
                         size_produded = int(m[1])
                         if size_produded >= size_allow or (
-                            check_time and t > time_ten_seconds and size_produded/size_allow >= percent):
+                            check_time and t > Ffmpeg.time_ten_seconds and size_produded/size_allow >= percent):
                             inefficient = True
                             self.p.kill()
                             break
@@ -369,13 +428,13 @@ class Ffmpeg(Ffprobe):
                 self.p.kill()
                 break
         Ffmpeg.log.debug(f'Ended {self.p}')
-        m = reg_running.search(line)
+        m = Ffmpeg.reg_running.search(line)
         if m:
             s = int(m[1])
             if size_allow is not None and s >= size_allow:
                 inefficient = True
         else:
-            m = reg_complete[stream_type].search(line)
+            m = Ffmpeg.reg_complete[stream_type].search(line)
             if m:
                 s = int(m[1])
                 if size_allow is not None and s >= size_allow:
@@ -385,92 +444,74 @@ class Ffmpeg(Ffprobe):
         self.returncode = self.p.wait()
         if size_allow is None:
             if progress_bar is None:
-                return self.returncode, timedelta_from_str(t), s
+                return self.returncode, time_from_str(t), s
             else:
                 return self.returncode, t, s
         else:
             return inefficient
 
 
-def get_duration_and_size(media: pathlib.Path, stream_id: int, stream_type: str):
-    """Get duration and size from a stream from a media file, just a wrapper, 
+class Stream:
+    lossless = {
+        'video': ('012v', '8bps', 'aasc', 'alias_pix', 'apng', 'avrp', 'avui', 'ayuv', 'bitpacked', 'bmp', 'bmv_video', 'brender_pix', 'cdtoons', 'cllc', 'cscd', 'dpx', 'dxa', 'dxtory', 'ffv1', 'ffvhuff', 'fits', 'flashsv', 'flic', 'fmvc', 'fraps', 'frwu', 'gif', 'huffyuv', 'hymt', 'lagarith', 'ljpeg', 'loco', 'm101', 'magicyuv', 'mscc', 'msp2', 'msrle', 'mszh', 'mwsc', 'pam', 'pbm', 'pcx', 'pfm', 'pgm', 'pgmyuv', 'pgx', 'png', 'ppm', 'psd', 'qdraw', 'qtrle', 'r10k', 'r210', 'rawvideo', 'rscc', 'screenpresso', 'sgi', 'sgirle', 'sheervideo', 'srgc', 'sunrast', 'svg', 'targa', 'targa_y216', 'tiff', 'tscc', 'utvideo', 'v210', 'v210x', 'v308', 'v408', 'v410', 'vble', 'vmnc', 'wcmv', 'wrapped_avframe', 'xbm', 'xpm', 'xwd', 'y41p', 'ylc', 'yuv4', 'zerocodec', 'zlib', 'zmbv'),
+        'audio': ('alac', 'ape', 'atrac3al', 'atrac3pal', 'dst', 'flac', 'mlp', 'mp4als', 'pcm_bluray', 'pcm_dvd', 'pcm_f16le', 'pcm_f24le', 'pcm_f32be', 'pcm_f32le', 'pcm_f64be', 'pcm_f64le', 'pcm_lxf', 'pcm_s16be', 'pcm_s16be_planar', 'pcm_s16le', 'pcm_s16le_planar', 'pcm_s24be', 'pcm_s24daud', 'pcm_s24le', 'pcm_s24le_planar', 'pcm_s32be', 'pcm_s32le', 'pcm_s32le_planar', 'pcm_s64be', 'pcm_s64le', 'pcm_s8', 'pcm_s8_planar', 'pcm_sga', 'pcm_u16be', 'pcm_u16le', 'pcm_u24be', 'pcm_u24le', 'pcm_u32be', 'pcm_u32le', 'pcm_u8', 'ralf', 's302m', 'shorten', 'tak', 'truehd', 'tta', 'wmalossless')
+    }
 
-    used in stream_info (scope: main)
-    used in delta_adder (scope: child/encoder)
-    used in encoder (scope: child/encoder)
+    @staticmethod
+    def get_duration_and_size(path: pathlib.Path, s_id: int, s_type: str):
+        """Get duration and size from a stream from a media file, just a wrapper, 
 
-    scope: main
-        End when KeyboardException is captured
-    scope: child
-        The EndExecution exception could be raised by ffmpeg_time_size_poller, we pass it as is
-    """
-    #ffmpeg.popen('-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-')
-    r, t, s = Ffmpeg(('-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), ).poll_time_size(stream_type)
-    return t, s
+        used in stream_info (scope: main)
+        used in delta_adder (scope: child/encoder)
+        used in encoder (scope: child/encoder)
 
+        scope: main
+            End when KeyboardException is captured
+        scope: child
+            The EndExecution exception could be raised by ffmpeg_time_size_poller, we pass it as is
+        """
+        #ffmpeg.popen('-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-')
+        r, t, s = Ffmpeg(('-i', path, '-c', 'copy', '-map', f'0:{s_id}', '-f', 'null', '-'), ).poll_time_size(s_type)
+        return t, s
 
-def stream_info(file_raw, stream_id, stream_type, stream):
-    """Get stream info, 
+    def __init__(self, path:pathlib.Path, stream_id:int, stream_info:dict):
+        self.path = path
+        self.id = stream_id
+        if stream_info['codec_type'] in ('video', 'audio'):
+            self.type = stream_info['codec_type']
+            self.duration, self.size = Stream.get_duration_and_size(path, self.id, self.type)
+            self.lossless = Stream.lossless[self.type]
+            if self.type == 'video':
+                self.width = stream_info['width']
+                self.height = stream_info['height']
+                if 'side_data_list' in stream_info and 'rotation' in stream_info['side_data_list'][0]:
+                    self.rotation = stream_info['side_data_list'][0]['rotation']
+                else:
+                    self.rotation = None
+        else:
+            self.type = None
 
-    used in scan_dir (scope: main)
+    def copy(self, log, dir_work_sub, prefix, file_out, file_done):
+        """Copy a stream from a media file as is, 
 
-    scope: main
-        End when KeyboardException is captured
-    """
-    log_scanner.info(f'Getting stream information for stream {stream_id} from {file_raw}')
-    duration, size = get_duration_and_size(file_raw, stream_id, stream_type)
-    if stream_type == 'video':
-        lossless = stream['codec_name'] in codec_vlo
-        if 'side_data_list' in stream and 'rotation' in stream['side_data_list'][0]:
-            return {
-                'type': stream_type,
-                'lossless': lossless,
-                'width': stream['width'],
-                'height': stream['height'],
-                'duration': duration,
-                'size': size,
-                'rotation': stream['side_data_list'][0]['rotation']
-            }
-        return {
-            'type': stream_type,
-            'lossless': lossless,
-            'width': stream['width'],
-            'height': stream['height'],
-            'duration': duration,
-            'size': size,
-            'rotation': None
-        }
-    else:
-        lossless = stream['codec_name'] in codec_alo
-        return {
-            'type': stream_type,
-            'lossless': lossless,
-            'duration': duration,
-            'size': size
-        }
+        used in encoder (scope: child/encoder)
 
-
-def stream_copy(log, dir_work_sub, prefix, file_raw, stream_id, file_out, file_done):
-    """Copy a stream from a media file as is, 
-
-    used in encoder (scope: child/encoder)
-
-    scope: child
-        The EndExecution exception could be raised by ffmpeg_dumb_poller and check_end, we pass it as is
-    """
-    log.info('Transcode inefficient, copying raw stream instead')
-    file_copy = pathlib.Path(
-        dir_work_sub,
-        f'{prefix}_copy.nut'
-    )
-    args = ('-i', file_raw, '-c', 'copy', '-map', f'0:{stream_id}', '-y', file_copy)
-    while Ffmpeg(args, null=True).poll_dumb():
-        Checker.is_end()
-        log.warning('Stream copy failed, trying that later')
-        Checker.sleep(5)
-    shutil.move(file_copy, file_out)
-    log.info('Stream copy done')
-    file_done.touch()
+        scope: child
+            The EndExecution exception could be raised by ffmpeg_dumb_poller and check_end, we pass it as is
+        """
+        log.info('Transcode inefficient, copying raw stream instead')
+        file_copy = pathlib.Path(
+            dir_work_sub,
+            f'{prefix}_copy.nut'
+        )
+        args = ('-i', self.path, '-c', 'copy', '-map', f'0:{self.id}', '-y', file_copy)
+        while Ffmpeg(args, null=True).poll_dumb():
+            Checker.is_end()
+            log.warning('Stream copy failed, trying that later')
+            Checker.sleep(5)
+        shutil.move(file_copy, file_out)
+        log.info('Stream copy done')
+        file_done.touch()
 
 
 def concat(log, prefix, concat_list, file_out, file_done):
@@ -604,12 +645,10 @@ def scan_dir(d: pathlib.Path):
                             for s_id, s in enumerate(
                                 json.loads(Ffprobe(('-show_streams', '-of', 'json', i)).stdout)['streams']
                             ):
-                                if s['codec_type'] in ('video', 'audio'):
-                                    if s['codec_type'] == 'video':
-                                        video = True
-                                    streams.append(stream_info(i, s_id, s['codec_type'], s))
-                                else:
-                                    streams.append(None)
+                                log_scanner.info(f'Getting stream information for stream {stream_id} from {i}')
+                                streams.append(Stream(i, s_id, s))
+                                if not video and s['codec_type'] == 'video':
+                                    video = True
                             if video:
                                 log_scanner.info(f'Added {i} to db, {len(streams)} streams')
                                 log_scanner.debug(f'{i} streams: {streams}')
@@ -633,10 +672,8 @@ def scan_dir(d: pathlib.Path):
 
 def encoder(
     dir_work_sub: pathlib.Path,
-    file_raw: pathlib.Path, file_out: pathlib.Path, file_done: pathlib.Path,
+    stream: Stream, file_out: pathlib.Path, file_done: pathlib.Path,
     encode_type: str, 
-    stream_id: int, stream_type: str, duration: datetime.timedelta, size_raw: int, lossless: bool,
-    stream_width: int, stream_height:int
 ):  
     """Encoding certain stream in a media file
 
@@ -654,27 +691,27 @@ def encoder(
 
         Should that, return to end this thread
     """
-    log = LoggingWrapper(f'[{file_raw.name}]')
+    log = LoggingWrapper(f'[{stream.path.name}]')
     try:
-        if encode_type == 'preview' and stream_type == 'audio':
-            log = LoggingWrapper(f'[{file_raw.name}] E:P S:A:{stream_id}')
+        if encode_type == 'preview' and stream.type == 'audio':
+            log = LoggingWrapper(f'[{stream.path.name}] E:P S:A:{stream.id}')
         else:
-            log = LoggingWrapper(f'[{file_raw.name}] E:{encode_type[:1].capitalize()} S:{stream_id}:{stream_type[:1].capitalize()}')
+            log = LoggingWrapper(f'[{stream.path.name}] E:{encode_type[:1].capitalize()} S:{stream.id}:{stream.type[:1].capitalize()}')
         log.info('Work started')
-        if encode_type == 'preview' and stream_type == 'audio':
-            prefix = f'{file_raw.stem}_preview_audio'
+        if encode_type == 'preview' and stream.type == 'audio':
+            prefix = f'{stream.path.stem}_preview_audio'
         else:
-            prefix = f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}'
+            prefix = f'{stream.path.stem}_{encode_type}_{stream.id}_{stream.type}'
         file_concat_pickle = dir_work_sub / f'{prefix}_concat.pkl'
         start = time_zero
         size_exist = 0
         concat_list = []
-        check_efficiency = encode_type == 'archive'  and not lossless 
+        check_efficiency = encode_type == 'archive'  and not stream.lossless 
         if file_out.exists() and file_out.stat().st_size:
             log.warning('Output already exists, potentially broken before, trying to recover it')
-            time_delta, size_delta = get_duration_and_size(file_out, 0, stream_type)
-            log.debug(f'Recovery: {file_out}, duration: {time_delta}, size: {size_delta}kB')
-            if abs(duration - time_delta) < time_second:
+            time_delta, size_delta = Stream.get_duration_and_size(file_out, 0, stream.type)
+            log.debug(f'Recovery: {file_out}, stream.duration: {time_delta}, size: {size_delta}kB')
+            if abs(stream.duration - time_delta) < time_second:
                 log.info('Last transcode successful, no need to transcode')
                 file_done.touch()
                 return
@@ -682,17 +719,17 @@ def encoder(
             file_check = dir_work_sub / f'{prefix}_{suffix}.nut'
             while file_check.exists() and file_check.stat().st_size:
                 Checker.is_end()
-                time_delta, size_delta = get_duration_and_size(file_check, 0, stream_type)
+                time_delta, size_delta = Stream.get_duration_and_size(file_check, 0, stream.type)
                 start += time_delta
                 size_exist += size_delta
-                log.warning(f'Recovery: {file_check}, duration: {time_delta}, size: {size_delta}kB. Total: duration:{start}, size: {size_exist}kB')
+                log.warning(f'Recovery: {file_check}, stream.duration: {time_delta}, size: {size_delta}kB. Total: stream.duration:{start}, size: {size_exist}kB')
                 concat_list.append(file_check.name)
                 suffix += 1
                 file_check = dir_work_sub / f'{prefix}_{suffix}.nut'
             log.info(f'Recovering last part to {file_check}')
             file_recovery = dir_work_sub / f'{prefix}_recovery.nut'
             poll = False
-            if stream_type == 'video':
+            if stream.type == 'video':
                 log.info('Checking if the interrupt file is usable')
                 p = Ffprobe(('-show_frames', '-select_streams', 'v:0', '-of', 'json', file_out))
                 if p.returncode == 0:
@@ -716,7 +753,7 @@ def encoder(
                 poll = True
                 p = Ffmpeg(('-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery))
             if poll:
-                r, t, s = p.poll_time_size(stream_type)
+                r, t, s = p.poll_time_size(stream.type)
                 if r:
                     log.warning('Recovery failed')
                 else:
@@ -724,7 +761,7 @@ def encoder(
                     start += t
                     size_exist += s
                     concat_list.append(file_check.name)
-                    log.info(f'{t} of failed transcode recovered. Total: duration:{start}, size{size_exist}')
+                    log.info(f'{t} of failed transcode recovered. Total: stream.duration:{start}, size{size_exist}')
             file_out.unlink()
             with file_concat_pickle.open('wb') as f:
                 pickle.dump((concat_list, start, size_exist), f)
@@ -733,30 +770,30 @@ def encoder(
                 concat_list, start, size_exist = pickle.load(f)
         if concat_list:
             # We've already transcoded this
-            if check_efficiency and size_raw and size_exist > size_raw * 0.9:
-                stream_copy(log, dir_work_sub, prefix, file_raw, stream_id, file_out, file_done)
+            if check_efficiency and stream.size and size_exist > stream.size * 0.9:
+                stream.copy(log, dir_work_sub, prefix, file_out, file_done)
                 return 
-            if start >= duration or duration - start < time_second:
+            if start >= stream.duration or stream.duration - start < time_second:
                 log.info(f'Seems already finished, concating all failed parts')
                 concat(log, prefix, concat_list, file_out, file_done)
                 return
         # Real encoding happenes below
         if check_efficiency:
-            size_allow = size_raw * 0.9 - size_exist
-        args = args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_type, stream_width, stream_height)
-        target_time = duration - start
+            size_allow = stream.size * 0.9 - size_exist
+        args = args_constructor(start, stream.path, file_out, stream.id, stream.type, encode_type, stream.width, stream.height)
+        target_time = stream.duration - start
         while True:
             Checker.is_end()
-            if stream_type == 'video':
+            if stream.type == 'video':
                 Pool.wait(log, encode_type)
             p = Ffmpeg(args)
             progress_bar = ProgressBar(log)
             if check_efficiency:
-                if p.poll_time_size(stream_type, size_allow, progress_bar, target_time):  # return ture for inefficient
-                    stream_copy(log, dir_work_sub, prefix, file_raw, stream_id, file_out, file_done)
+                if p.poll_time_size(stream.type, size_allow, progress_bar, target_time):  # return ture for inefficient
+                    stream.copy(log, dir_work_sub, prefix, file_out, file_done)
                     return
             else:
-                p.poll_time_size(stream_type, progress_bar=progress_bar, target_time=target_time)
+                p.poll_time_size(stream.type, progress_bar=progress_bar, target_time=target_time)
             #CleanPrinter.print(f'{prompt_title} waiting to end')
             if p.returncode == 0:
                 if concat_list:
@@ -1277,29 +1314,23 @@ if __name__ == '__main__':
                     work_archive = not file_archive.exists()
                     work_preview = not file_preview.exists()
                     for stream_id, stream in enumerate(j):
-                        if stream is None:
+                        if stream.type is None:
                             if work_archive:
                                 streams_archive.append(None)
                             if work_preview:
                                 streams_preview.append(None)
                         else:
-                            if stream['type'] in ('video', 'audio'):
+                            if stream['type'] == 'video':
+                                videos[stream_id] = stream
+                            if work_archive:
+                                streams_archive, threads_archive = thread_adder(dir_work_sub, i, 'archive', stream_id, stream['type'], stream['duration'], stream['size'], stream['lossless'], 0, 0, streams_archive, threads_archive)
+                            if work_preview:
                                 if stream['type'] == 'video':
-                                    videos[stream_id] = stream
-                                if work_archive:
-                                    streams_archive, threads_archive = thread_adder(dir_work_sub, i, 'archive', stream_id, stream['type'], stream['duration'], stream['size'], stream['lossless'], 0, 0, streams_archive, threads_archive)
-                                if work_preview:
-                                    if stream['type'] == 'video':
-                                        streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', stream_id, 'video', stream['duration'], stream['size'], stream['lossless'], stream['width'], stream['height'], streams_preview, threads_preview)
-                                    else:
-                                        audios.append(stream_id)
-                                        audios_size += stream['size']
-                                        audios_duration = max(stream['duration'], audios_duration)
-                            else:
-                                if work_archive:
-                                    streams_archive.append(None)
-                                if work_preview:
-                                    streams_preview.append(None)
+                                    streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', stream_id, 'video', stream['duration'], stream['size'], stream['lossless'], stream['width'], stream['height'], streams_preview, threads_preview)
+                                else:
+                                    audios.append(stream_id)
+                                    audios_size += stream['size']
+                                    audios_duration = max(stream['duration'], audios_duration)
                     threads_screenshot=[]
                     if len(videos) == 1:
                         file_screenshot = dir_screenshot / f'{i.stem}.jpg'
