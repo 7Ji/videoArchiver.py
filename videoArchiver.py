@@ -14,13 +14,15 @@ import time
 import pickle
 import math
 import logging
-# The following modules are written
-import duration
+import contextlib
 
 time_zero = datetime.timedelta()
 time_second = datetime.timedelta(seconds=1)
 
 class EndExecution(RuntimeError):
+    pass
+
+class NotVideo(TypeError):
     pass
 
 
@@ -87,6 +89,204 @@ class LoggingWrapper:
     def debug(self, content):
         logging.debug(f'{self.title}{content}')
 
+
+class Duration:
+
+    reg_hms = re.compile(r'(\d+):(\d+):(\d+\.?\d*)')
+    reg_ms = re.compile(r'(\d+):(\d+\.?\d*)')
+    reg_s = re.compile(r'(\d+\.?\d*)')
+
+    @staticmethod
+    def __str_to_time(time):
+        m = Duration.reg_hms.search(time)
+        if m:
+            return int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3])
+        m = Duration.reg_ms.search(time)
+        if m:
+            return int(m[1]) * 60 + float(m[2])
+        m = Duration.reg_s.search(time)
+        if m:
+            return float(m[1])
+        raise ValueError(f'{time} is not a valid str to convert to time')
+
+    def __init__(self, time):
+        self.update(time)
+
+    def update(self, time: str | int | float):
+        if isinstance(time, str):
+            self.time = Duration.__str_to_time(time)
+        elif isinstance(time, int | float):
+            self.time = time
+        else:
+            raise ValueError(f'Can not initialize a Duration object with {type(time)}')
+
+    def __repr__(self):
+        return f'{self.__class__.__module__}.{self.__class__.__qualname__}({self.time})'
+
+    def __str__(self):
+        hours, remainder = divmod(self.time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f'{int(hours):02d}:{int(minutes):02d}:{seconds:0>5.2f}'
+
+    def __int__(self):
+        return int(self.time)
+
+    def __float__(self):
+        return float(self.time)
+
+    def __round__(self, ndigits = None):
+        return Duration(round(self.time, ndigits))
+
+    @staticmethod
+    def __complain_comparasion(action, other):
+        raise ValueError(f'Can not {action} Duration with {type(other)}')
+
+    def __add__(self, other:  int | float | str):
+        if isinstance(other, Duration):
+            return Duration(self.time + other.time)
+        elif isinstance(other, int | float):
+            return Duration(self.time + other)
+        elif isinstance(other, str):
+            return Duration(self.time + Duration(other).time)
+        Duration.__complain_comparasion('add', other)
+
+    def __sub__(self, other):
+        if isinstance(other, Duration):
+            return Duration(self.time - other.time)
+        elif isinstance(other, int | float):
+            return Duration(self.time - other)
+        elif isinstance(other, str):
+            return Duration(self.time - Duration(other).time)
+        Duration.__complain_comparasion('substract', other)
+
+    def __mul__(self, other: int | float):
+        if isinstance(other, int | float):
+            return Duration(self.time * other)
+        Duration.__complain_comparasion('multiply', other)
+
+    def __truediv__(self, other: int | float):
+        if isinstance(other, int | float):
+            return Duration(self.time / other)
+        Duration.__complain_comparasion('divide', other)
+
+    def __floordiv__(self, other: int | float):
+        if isinstance(other, int | float):
+            return Duration(self.time // other)
+        Duration.__complain_comparasion('divide', other)
+
+    def __divmod__(self, other: int | float):
+        if isinstance(other, int | float):
+            time, remainder = divmod(self.time, other)
+            return Duration(time), Duration(remainder)
+        Duration.__complain_comparasion('divide', other)
+
+    def __lt__(self, other):
+        if isinstance(other, Duration):
+            if self.time < other.time:
+                return True
+            else:
+                return False
+        elif isinstance(other, int | float):
+            if self.time < other:
+                return True
+            else:
+                return False
+        elif isinstance(other, str):
+            if self.time < Duration(other).time:
+                return True
+            else:
+                return False
+        Duration.__complain_comparasion('compare', other)
+
+    def __le__(self, other):
+        if isinstance(other, Duration):
+            if self.time <= other.time:
+                return True
+            else:
+                return False
+        elif isinstance(other, int | float):
+            if self.time <= other:
+                return True
+            else:
+                return False
+        elif isinstance(other, str):
+            if self.time <= Duration(other).time:
+                return True
+            else:
+                return False
+        Duration.__complain_comparasion('compare', other)
+
+    def __eq__(self, other):
+        if isinstance(other, Duration):
+            if self.time == other.time:
+                return True
+            else:
+                return False
+        elif isinstance(other, int | float):
+            if self.time == other:
+                return True
+            else:
+                return False
+        elif isinstance(other, str):
+            if self.time == Duration(other).time:
+                return True
+            else:
+                return False
+        Duration.__complain_comparasion('compare', other)
+
+    def __ne__(self, other):
+        if isinstance(other, Duration):
+            if self.time != other.time:
+                return True
+            else:
+                return False
+        elif isinstance(other, int | float):
+            if self.time != other:
+                return True
+            else:
+                return False
+        elif isinstance(other, str):
+            if self.time != Duration(other).time:
+                return True
+            else:
+                return False
+        Duration.__complain_comparasion('compare', other)
+
+    def __gt__(self, other):
+        if isinstance(other, Duration):
+            if self.time > other.time:
+                return True
+            else:
+                return False
+        elif isinstance(other, int | float):
+            if self.time > other:
+                return True
+            else:
+                return False
+        elif isinstance(other, str):
+            if self.time > Duration(other).time:
+                return True
+            else:
+                return False
+        Duration.__complain_comparasion('compare', other)
+
+    def __ge__(self, other):
+        if isinstance(other, Duration):
+            if self.time >= other.time:
+                return True
+            else:
+                return False
+        elif isinstance(other, int | float):
+            if self.time >= other:
+                return True
+            else:
+                return False
+        elif isinstance(other, str):
+            if self.time >= Duration(other).time:
+                return True
+            else:
+                return False
+        Duration.__complain_comparasion('compare', other)
 
 
 class ProgressBar(CleanPrinter):
@@ -187,56 +387,6 @@ class ProgressBar(CleanPrinter):
         self.display()
 
 
-# def check_end_kill(p:subprocess.Popen):
-#     """Check if the work_end flag is set, and if it is, raise the EndExecution exception and kill the Popen object
-
-#     used in ffmpeg_dumb_poller (scope: child)
-#         used in stream_copy (scope: child/encoder)
-#         used in encoder (scope: child/endoer)
-#         used in muxer (scope: child/muxer)
-#         used in screenshooter (scopte: child/screenshooter)
-    
-#     used in ffmpeg_time_size_poller (scope: main + child)
-#         used in encoder (scope: child/encoder)
-#         used in get_duration_and_size (wrapper)
-#             used in stream_info (scope: main)
-#             used in delta_adder (scope: child/encoder)
-#             used in encoder (scope: child/encoder)
-
-#     used in encoder (scope: child/encoder)
-#     used in muxer (scope: child/ muxer)
-#     used in scneenshooter (scope: child/screenshooter)
-
-#     scope: child
-#         Should the work_end flag be captured, raise the EndExecution exception
-#     """
-#     if work_end:
-#         p.kill()
-#         logging.debug(f'[Subprocess] Killed {p}')
-#         raise EndExecution
-
-# def check_end():
-#     """Check if the work_end flag is set, and if it is, raise the EndExecution exception
-
-#     used in stream_copy (scope: child/encoder)
-#     used in concat (scope: child/encoder)
-#     used in wait_cpu (scope: child)
-#         used in encoder (scope: child/encoder)
-#         used in screenshooter (scope: child/screenshooter)
-#     used in cleaner (scope: child/cleaner)
-#     used in db_write (scope: child/cleaner + main)
-#         used in cleaner (scope: child/cleaner)
-#         used in main (scope: main)
-#         used in scan_dir (scope: main)
-#     used in scheduler (scope: child/scheduler)
-
-#     scope: child
-#         Should the work_end flag be captured, raise the EndExecution exception
-#     """
-#     if work_end:
-#         raise EndExecution
-
-
 class Ffprobe:
     path = pathlib.Path(shutil.which('ffprobe'))
     log = LoggingWrapper('[Subprocess]')
@@ -261,6 +411,7 @@ class Ffprobe:
             chars.append(char)
         self.stdout = b''.join(chars)
         self.returncode = self.p.wait()
+
 
 class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3 h264 encoding work
 
@@ -311,20 +462,42 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
         if size_allow is not None:
             inefficient = False
         check_time = size_allow is None or (size_allow is not None and progress_bar is not None)
-        reader = self.p.stderr
-        if check_time:
-            t = time_zero
-            percent = 1
+        chars = []
+        while True:
+            Checker.is_end(self.p)
+            if size_allow is not None and file_out.stat().st_size > size_allow:
+                p.kill()
+                return True
+            char = self.p.stderr.read(100)
+            if char == b'':
+                break
+            chars.append(char)
+        log = b''.join(chars).split(b'\n')
+        for paragraph_id, paragraph in enumerate(reversed(log)):
+            lines = paragraph.split(b'\r')
+            if len(lines) > 1:
+                break
+        m = Ffmpeg.reg_complete[stream_type].search(log[-paragraph_id])
+        if m:
+            pass
+        m = None
+        t = None
+        for line in reversed(lines): # This line has frame=xxx, fps=xxx, size=xxx
+            if m is None:
+                m = Ffmpeg.reg_running.search(line)
+            if t is None:
+                t = Ffmpeg.reg_time.search(line)
+            if m is not None and t is not None:
+                break
+
+
+            
+
+
+
         while self.p.poll() is None:
             Checker.is_end(self.p)
             chars = []
-            while True:
-                Checker.is_end(self.p)
-                char = reader.read(1)
-                if char in (b'\r', b''):
-                    break
-                elif char != b'\n':
-                    chars.append(char)
             if chars:
                 line = b''.join(chars).decode('utf-8')
                 if check_time:
@@ -372,6 +545,52 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
             return inefficient
 
 
+class Video:
+    def __init__(self, path):
+        self.path = path
+        p = Ffprobe(('-show_format', '-show_streams', '-select_streams', 'V', '-of', 'json', i))
+        if p.returncode == 0:
+            j = json.loads(p.stdout)
+            j_format =  j['format']['format_name']
+            if not (j_format.endswith('_pipe') or j_format in ('image2', 'tty')) and j['streams']:
+                streams = []
+                video = False
+                for stream_id, stream in enumerate(
+                    json.loads(Ffprobe(('-show_streams', '-of', 'json', i)).stdout)['streams']
+                ):
+                    #log_scanner.info(f'Getting stream information for stream {stream_id} from {i}')
+                    stream_type = stream['codec_type'] 
+                    if stream_type in ('video', 'audio'):
+                        stream_duration, stream_size = Stream.get_duration_and_size(path, stream_id, stream_type)
+                        streams.append(Stream(stream_id, stream_type, stream_duration, stream_size, stream))
+                    else:
+                        streams.append(None)
+                    if not video and stream_type == 'video':
+                        video = True
+                if video:
+                    self.streams = streams
+                    self.len = len(streams)
+                    return
+        raise NotVideo
+
+    def __iter__(self):
+        return iter(self.streams)
+
+    def __str__(self):
+        return str(self.path)
+
+    def __repr__(self):
+        return f'{self.__class__.__module__}.{self.__class__.__qualname__}({self.path})'
+
+    def __len__(self):
+        return self.len
+
+    def __getitem__(self, key):
+        if not isinstance(key, int) and (key > self.len or key < -self.len - 1):
+            raise KeyError(f'{key} is not a valid stream id')
+        return self.streams[key]
+
+
 class Stream:
     lossless = {
         'video': ('012v', '8bps', 'aasc', 'alias_pix', 'apng', 'avrp', 'avui', 'ayuv', 'bitpacked', 'bmp', 'bmv_video', 'brender_pix', 'cdtoons', 'cllc', 'cscd', 'dpx', 'dxa', 'dxtory', 'ffv1', 'ffvhuff', 'fits', 'flashsv', 'flic', 'fmvc', 'fraps', 'frwu', 'gif', 'huffyuv', 'hymt', 'lagarith', 'ljpeg', 'loco', 'm101', 'magicyuv', 'mscc', 'msp2', 'msrle', 'mszh', 'mwsc', 'pam', 'pbm', 'pcx', 'pfm', 'pgm', 'pgmyuv', 'pgx', 'png', 'ppm', 'psd', 'qdraw', 'qtrle', 'r10k', 'r210', 'rawvideo', 'rscc', 'screenpresso', 'sgi', 'sgirle', 'sheervideo', 'srgc', 'sunrast', 'svg', 'targa', 'targa_y216', 'tiff', 'tscc', 'utvideo', 'v210', 'v210x', 'v308', 'v408', 'v410', 'vble', 'vmnc', 'wcmv', 'wrapped_avframe', 'xbm', 'xpm', 'xwd', 'y41p', 'ylc', 'yuv4', 'zerocodec', 'zlib', 'zmbv'),
@@ -395,24 +614,22 @@ class Stream:
         r, t, s = Ffmpeg(('-i', path, '-c', 'copy', '-map', f'0:{s_id}', '-f', 'null', '-'), ).poll_time_size(s_type)
         return t, s
 
-    def __init__(self, path:pathlib.Path, stream_id:int, stream_info:dict):
-        self.path = path
+    def __init__(self, parent:Video, stream_id:int, stream_type:str, stream_duration:Duration, stream_size:int, stream_info:dict):
+        self.parent = parent
         self.id = stream_id
-        if stream_info['codec_type'] in ('video', 'audio'):
-            self.type = stream_info['codec_type']
-            self.duration, self.size = Stream.get_duration_and_size(path, self.id, self.type)
-            self.lossless = Stream.lossless[self.type]
-            if self.type == 'video':
-                self.width = stream_info['width']
-                self.height = stream_info['height']
-                if 'side_data_list' in stream_info and 'rotation' in stream_info['side_data_list'][0]:
-                    self.rotation = stream_info['side_data_list'][0]['rotation']
-                else:
-                    self.rotation = None
-        else:
-            self.type = None
+        self.type = stream_type
+        self.duration = stream_duration
+        self.size = stream_size
+        self.lossless = Stream.lossless[self.type]
+        if self.type == 'video':
+            self.width = stream_info['width']
+            self.height = stream_info['height']
+            if 'side_data_list' in stream_info and 'rotation' in stream_info['side_data_list'][0]:
+                self.rotation = stream_info['side_data_list'][0]['rotation']
+            else:
+                self.rotation = None
 
-    def copy(self, log, dir_work_sub, prefix, file_out, file_done):
+    def copy(self, log:LoggingWrapper, dir_work_sub:pathlib.Path, prefix:str, file_out:pathlib.Path, file_done:pathlib.Path):
         """Copy a stream from a media file as is, 
 
         used in encoder (scope: child/encoder)
@@ -421,11 +638,8 @@ class Stream:
             The EndExecution exception could be raised by ffmpeg_dumb_poller and check_end, we pass it as is
         """
         log.info('Transcode inefficient, copying raw stream instead')
-        file_copy = pathlib.Path(
-            dir_work_sub,
-            f'{prefix}_copy.nut'
-        )
-        args = ('-i', self.path, '-c', 'copy', '-map', f'0:{self.id}', '-y', file_copy)
+        file_copy = dir_work_sub / f'{prefix}_copy.nut'
+        args = ('-i', self.parent.path, '-c', 'copy', '-map', f'0:{self.id}', '-y', file_copy)
         while Ffmpeg(args, null=True).poll_dumb():
             Checker.is_end()
             log.warning('Stream copy failed, trying that later')
@@ -550,33 +764,21 @@ def scan_dir(d: pathlib.Path):
     for i in d.iterdir():
         if i.is_dir():
             scan_dir(i)
-        elif i.is_file() and i not in Database.dict():
+        elif i.is_file() and not db.query(i):
             wait_close(i)
             db_entry = None
-            if i not in Database.dict():
+            if not db.query(i):
                 log_scanner.info(f'Discovered {i}')
                 try:
-                    p = Ffprobe(('-show_format', '-show_streams', '-select_streams', 'V', '-of', 'json', i))
-                    if p.returncode == 0:
-                        j = json.loads(p.stdout)
-                        j_format =  j['format']['format_name']
-                        if not (j_format.endswith('_pipe') or j_format in ('image2', 'tty')) and j['streams']:
-                            streams = []
-                            video = False
-                            for s_id, s in enumerate(
-                                json.loads(Ffprobe(('-show_streams', '-of', 'json', i)).stdout)['streams']
-                            ):
-                                log_scanner.info(f'Getting stream information for stream {stream_id} from {i}')
-                                streams.append(Stream(i, s_id, s))
-                                if not video and s['codec_type'] == 'video':
-                                    video = True
-                            if video:
-                                log_scanner.info(f'Added {i} to db, {len(streams)} streams')
-                                log_scanner.debug(f'{i} streams: {streams}')
-                                db_entry = streams
+                    db_entry = Video(i)
+                    log_scanner.info(f'Added {i} to db')
+                    log_scanner.debug(f'{i} streams: {streams}')
+                    
+                except NotVideo:
+                    db_entry = None
                 except EndExecution:
                     return
-            Database.add(i, db_entry)
+            db.add(i, db_entry)
 
 
 # def delta_adder(file_check, stream_type, start, size_exist):
@@ -932,49 +1134,49 @@ class Checker:
             time.sleep(1)
             t -= 1
 
+    @contextlib.contextmanager
+    def context(manager, p:subprocess.Popen=None):
+        if Checker.end_flag:
+            raise EndExecution
+        with manager as f:
+            yield f
+        if Checker.end_flag:
+            raise EndExecution
+
 
 class Database:
-    lock = threading.RLock()
-    log = LoggingWrapper('[Database]')
-    db = {}
-    backend = ''
-    
-    @staticmethod
-    def add(key, value):
-        Checker.is_end()
-        with Database.lock:
-            Checker.is_end()
-            if key not in Database.db:
-                Database.db[key] = value
-                Database.log.info(f'Added {key}')
-                Database.write()
 
-    @staticmethod
-    def remove(key):
-        Checker.is_end()
-        with Database.lock:
-            Checker.is_end()
-            if key in Database.db:
-                del Database.db[key]
-                Database.log.info(f'Removed {key}')
-                Database.write()
+    def __init__(self, backend):
+        self.lock = threading.Lock()
+        self.log = LoggingWrapper('[Database]')
+        self.backend = backend
+        self.read()
 
-    @staticmethod
-    def dict():
+    def __iter__(self):
+        with Checker.context(self.lock):
+            return iter(self.db)
+
+    def dict(self):
         """Return the database as dict, currently this just means return the db
         """
-        return Database.db
+        with Checker.context(self.lock):
+            return self.db
 
-    @staticmethod
-    def read():
-        if Database.backend.exists():
-            Checker.is_end()
-            with open(Database.backend, 'rb') as f:
+    def items(self):
+        with Checker.context(self.lock):
+            return self.db.items()
+
+    def read(self):
+        with Checker.context(self.lock):
+            if self.backend.exists():
                 Checker.is_end()
-                Database.db = pickle.load(f)
+                with open(self.backend, 'rb') as f:
+                    Checker.is_end()
+                    self.db = pickle.load(f)
+            else:
+                self.db = {}
 
-    @staticmethod       
-    def write():
+    def write(self):
         """Write the db if it's updated
 
         used in cleaner (scope: child/cleaner)
@@ -987,18 +1189,35 @@ class Database:
         scope: main
             End when KeyboardException is captured
         """
-        Checker.is_end()
-        with Database.lock:
-            Checker.is_end()
-            Database.log.info('Updated')
-            Checker.is_end()
-            with open(Database.backend, 'wb') as f:
-                Checker.is_end()
-                pickle.dump(Database.db, f)
-            Database.log.info('Saved')
+        with Checker.context(self.lock):
+            self.log.info('Updated')
+            with Checker.context(open(self.backend, 'wb')) as f:
+                pickle.dump(self.db, f)
+            self.log.info('Saved')
 
-    @staticmethod
-    def clean():
+    def add(self, key, value):
+        with Checker.context(self.lock):
+            if key not in self.db:
+                self.db[key] = value
+                self.log.info(f'Added {key}')
+                self.write()
+
+    def remove(self, key):
+        with Checker.context(self.lock):
+            if key in self.db:
+                del self.db[key]
+                self.log.info(f'Removed {key}')
+                self.write()
+
+    
+    def query(self, key):
+        with Checker.context(self.lock):
+            if key in self.db:
+                return True
+            return False
+
+
+    def clean(self):
         """Cleaning the db, remove files not existing or already finished
 
         used in main (scope: main)
@@ -1006,11 +1225,9 @@ class Database:
         scope: main
             End when KeyboardException is captured
         """
-        Checker.is_end()
-        with Database.lock:
-            Checker.is_end()
+        with Checker.context(self.lock):
             db_new = {}
-            for i_r, j_r in {i:j for i, j in Database.db.items() if i.exists()}.items():
+            for i_r, j_r in {i:j for i, j in self.db.items() if i.exists()}.items():
                 Checker.is_end()
                 name = f'{i_r.stem}.mkv'
                 finish = False
@@ -1030,13 +1247,12 @@ class Database:
                                         break
                 if finish and i_r.exists():
                     i_r.unlink()
-                    Database.log.warning(f'Purged already finished video {i_r}')
+                    self.log.warning(f'Purged already finished video {i_r}')
                 else:
                     db_new[i_r] = j_r
-            if Database.db != db_new:
-                Database.db = db_new
-                Database.write()
-        
+            if self.db != db_new:
+                self.db = db_new
+                self.write()
 
 
 class Pool:
@@ -1095,9 +1311,7 @@ class Pool:
         log.info('Waiting for CPU resources')
         waiter = threading.Event()
         log.debug(f'Waiting for {waiter} to be set')
-        Checker.is_end()
-        with lock:
-            Checker.is_end()
+        with Checker.context(lock):
             pool.append(waiter)
         Pool.e.set()
         waiter.wait()
@@ -1108,17 +1322,17 @@ class Pool:
     class Work:
         @staticmethod
         def add(entry):
-            with Pool.lock_work:
+            with Checker.context(Pool.lock_work):
                 Pool.pool_work.append(entry)
 
         @staticmethod
         def remove(entry):
-            with Pool.lock_work:
+            with Checker.context(Pool.lock_work):
                 Pool.pool_work.remove(entry)
 
         @staticmethod
         def query(entry):
-            with Pool.lock_work:
+            with Checker.context(Pool.lock_work):
                 if entry in Pool.pool_work:
                     return True
             return False
@@ -1128,7 +1342,7 @@ class Pool:
         Pool.log.info('Started')
         while not work_end:
             try:
-                with Pool.lock_264, Pool.lock_av1, Pool.lock_ss:
+                with Checker.context(Pool.lock_264), Checker.context(Pool.lock_av1), Checker.context(Pool.lock_ss):
                     if not Pool.pool_264 and not Pool.pool_av1 and not Pool.pool_ss:
                         Pool.e.clear()
                 Checker.is_end()
@@ -1199,17 +1413,16 @@ if __name__ == '__main__':
     )
     work, dirs_work_sub = ([] for i in range(2))
     work_end = False
-    Database.backend = dir_work / 'db.pkl'
-    Database.read()
+    db = Database(dir_work / 'db.pkl')
     log_main = LoggingWrapper('[Main]')
     log_scanner = LoggingWrapper('[Scanner]')
     log_main.info('Started')
     threading.Thread(target = Pool.scheduler).start()
     try:
         while True:
-            Database.clean()
+            db.clean()
             scan_dir(dir_raw)
-            for i, j in Database.dict().items():
+            for i, j in db.items():
                 if j is not None and not Pool.Work.query(i):
                     dir_work_sub = pathlib.Path(
                         dir_work,
@@ -1296,7 +1509,7 @@ if __name__ == '__main__':
         log_main.warning('Keyboard Interrupt received, exiting safely...')
         for thread in threading.enumerate(): 
             log_main.debug(f'Alive thread before exiting: {thread.name}')
-        Database.write()
+        db.write()
         Pool.wake()
         Checker.end()
         hint = False
