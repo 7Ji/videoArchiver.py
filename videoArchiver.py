@@ -7,7 +7,6 @@ import subprocess
 import json
 import re
 import pathlib
-import datetime
 import shutil
 import psutil
 import time
@@ -16,8 +15,6 @@ import math
 import logging
 import contextlib
 
-time_zero = datetime.timedelta()
-time_second = datetime.timedelta(seconds=1)
 
 class EndExecution(RuntimeError):
     pass
@@ -35,6 +32,13 @@ class CleanPrinter:
     width = shutil.get_terminal_size()[0]
 
     @staticmethod
+    def check_terminal():
+        width = shutil.get_terminal_size()[0]
+        if width == CleanPrinter.width:
+            return 
+        CleanPrinter.width = width
+
+    @staticmethod
     def clear_line():
         """Always clean the line before printing, this is to avoid the unfinished progress bar being stuck on the screen
         """
@@ -42,6 +46,7 @@ class CleanPrinter:
 
     @staticmethod
     def print(content, loglevel=logging.INFO, end=None):
+        CleanPrinter.check_terminal()
         if CleanPrinter.bars: # Only clear line if there are progress bars being displayed
             CleanPrinter.clear_line()
         if end is None:
@@ -62,9 +67,6 @@ class CleanPrinter:
             case _:
                 pass
 
-
-def clamp(n, minimum, maximum):
-    return min(max(n, minimum), maximum)
 
 class LoggingWrapper:
     """Wrapper for printing and logging, ease the pain to type prompt_title every time
@@ -90,14 +92,23 @@ class LoggingWrapper:
         logging.debug(f'{self.title}{content}')
 
 
+def clamp(n, minimum, maximum):
+    return min(max(n, minimum), maximum)
+
 class Duration:
 
+    reg_dhms = re.compile(r'(\d+):(\d+):(\d+):(\d+\.?\d*)')
     reg_hms = re.compile(r'(\d+):(\d+):(\d+\.?\d*)')
     reg_ms = re.compile(r'(\d+):(\d+\.?\d*)')
     reg_s = re.compile(r'(\d+\.?\d*)')
 
     @staticmethod
-    def __str_to_time(time):
+    def __str_to_time(time: str):
+        if time.count(':') > 3:
+            raise ValueError(f'{time} has too many ":"')
+        m = Duration.reg_dhms.search(time)
+        if m:
+            return int(m[1]) * 86400 + int(m[2]) * 3600 + int(m[3]) * 60 + float(m[3])
         m = Duration.reg_hms.search(time)
         if m:
             return int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3])
@@ -109,10 +120,7 @@ class Duration:
             return float(m[1])
         raise ValueError(f'{time} is not a valid str to convert to time')
 
-    def __init__(self, time):
-        self.update(time)
-
-    def update(self, time: str | int | float):
+    def __init__(self, time: str | int | float = 0):
         if isinstance(time, str):
             self.time = Duration.__str_to_time(time)
         elif isinstance(time, int | float):
@@ -120,13 +128,19 @@ class Duration:
         else:
             raise ValueError(f'Can not initialize a Duration object with {type(time)}')
 
+    def seconds(self):
+        return self.time
+
     def __repr__(self):
         return f'{self.__class__.__module__}.{self.__class__.__qualname__}({self.time})'
+
+    def __bool__(self):
+        return self.time != 0
 
     def __str__(self):
         hours, remainder = divmod(self.time, 3600)
         minutes, seconds = divmod(remainder, 60)
-        return f'{int(hours):02d}:{int(minutes):02d}:{seconds:0>5.2f}'
+        return f'{int(hours):02d}:{int(minutes):02d}:{seconds:0>12.9f}'
 
     def __int__(self):
         return int(self.time)
@@ -389,7 +403,6 @@ class ProgressBar(CleanPrinter):
 
 class Ffprobe:
     path = pathlib.Path(shutil.which('ffprobe'))
-    log = LoggingWrapper('[Subprocess]')
     def __init__(self, args):
         self.p = subprocess.Popen((self.path, *args), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.poll_stdout()
@@ -399,13 +412,14 @@ class Ffprobe:
             Checker.is_end(self.p)
             Checker.sleep(1)
         self.returncode = self.p.wait()
+        return self.returncode
 
     def poll_stdout(self):
         chars = []
         reader = self.p.stdout
         while True:
             Checker.is_end(self.p)
-            char = reader.read(1)
+            char = reader.read(100)
             if char == b'':
                 break
             chars.append(char)
@@ -416,21 +430,36 @@ class Ffprobe:
 class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3 h264 encoding work
 
     path = pathlib.Path(shutil.which('ffmpeg'))
+    log = LoggingWrapper('[Subprocess]')
     reg_complete = {
-        'video': re.compile(r'video:(\d+)kB'),
+        'video': re.compile(r'video:(\d+)kB'), 
         'audio': re.compile(r'audio:(\d+)kB')
     }
     reg_running = re.compile(r'size= *(\d+)kB')
     reg_time = re.compile(r' time=([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{2}) ')
-    time_ten_seconds = datetime.timedelta(seconds=10)
+    args_video_archive = ('-c:v', 'libx264', '-crf', '23', '-preset', 'veryslow')
+    args_video_preview = ('-c:v', 'libsvtav1', '-qp', '63', '-preset', '8')
+    args_audio_archive = ('-c:a', 'libfdk_aac', '-vbr', '5')
+    args_audio_preview = ('-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a')
+
+    @staticmethod
+    def __log_cutter(log):
+        log = b''.join(log).split(b'\n')
+        for paragraph_id, paragraph in enumerate(reversed(log)):
+            lines = paragraph.split(b'\r')
+            if len(lines) > 1:
+                break
+        return log[-paragraph_id], lines
 
     def __init__(self, args, null=False):
+        self.null = null
         if null:
             self.p = subprocess.Popen((self.path, *args), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             self.p = subprocess.Popen((self.path, *args), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
-    def poll_dumb(self):
+    # Multiple pollers are used, this is to save resource used to check the if statement hell
+    def poll_dumb(self):  
         """Polling the ffmpeg endlessly until it is done, do nothing other than trying to capture the work_end flag
 
         used in stream_copy (scope: child/encoder)
@@ -441,10 +470,79 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
         scope: child
             The EndExecution exception could be raised by check_end_kill, we pass it as is
         """
-        super().poll_dumb()
+        if self.null:
+            super().poll_dumb()
+        else:
+            while self.p.stderr.read(100) != b'':
+                Checker.is_end(self.p)
+            self.returncode = self.p.wait()
         return self.returncode
-    
-    def poll_time_size(self, stream_type:str, size_allow:int=None, progress_bar:ProgressBar=None, target_time:datetime.timedelta=None):
+
+    def __refuse_null(self):
+        if self.null:
+            self.p.kill()
+            raise ValueError('Polling from void')
+
+    def poll_time(self):  
+        self.__refuse_null()
+        chars = []
+        Ffmpeg.log.debug(f'Started {self.p}')
+        while True:
+            Checker.is_end(self.p)
+            char = self.p.stderr.read(100)
+            if char == b'':
+                break
+            chars.append(char)
+        Ffmpeg.log.debug(f'Ended {self.p}')
+        self.returncode = self.p.wait()
+        if self.returncode == 0:
+            last, lines = Ffmpeg.__log_cutter(chars)
+            for line in reversed(lines):
+                t = Ffmpeg.reg_time.search(line)
+                if t:
+                    return self.returncode, Duration(t[1])
+        return self.returncode, None
+
+    def poll_time_size(self, stream_type:str='video'):
+        self.__refuse_null()
+        chars = []
+        Ffmpeg.log.debug(f'Started {self.p}')
+        while True:
+            Checker.is_end(self.p)
+            char = self.p.stderr.read(100)
+            if char == b'':
+                break
+            chars.append(char)
+        Ffmpeg.log.debug(f'Ended {self.p}')
+        self.returncode = self.p.wait()
+        if self.returncode == 0:
+            last, lines = Ffmpeg.__log_cutter(chars)
+            s = Ffmpeg.reg_complete[stream_type].search(last)
+            if s:
+                for line in reversed(lines): # This line has frame=xxx, fps=xxx, size=xxx
+                    t = Ffmpeg.reg_time.search(line)
+                    if t:
+                        return self.returncode, Duration(t[1]), int(s[1]) * 1024
+        return self.returncode, None, None
+
+    def poll_size(self, stream_type:str='video',size_allow:int=0, file_out:pathlib.Path=None):
+        self.__refuse_null()
+        chars = []
+        Ffmpeg.log.debug(f'Started {self.p}')
+        while True:
+            Checker.is_end(self.p)
+            if file_out.stat().size() >= size_allow:
+                self.p.kill()
+                return None, True
+            char = self.p.stderr.read(100)
+            if char == b'':
+                break
+            chars.append(char)
+        Ffmpeg.log.debug(f'Ended {self.p}')
+        self.returncode = self.p.wait()
+        return self.returncode, file_out.stat().size() >= size_allow
+
+    def poll_time_size_limit(self, stream_type:str, size_allow:int=0, file_out:pathlib.Path=None):
         """Polling time and size information from a running ffmpeg subprocess.Popen
 
         used in encoder (scope: child/encoder)
@@ -458,118 +556,77 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
         scope: child
             The EndExecution exception could be raised by check_end_kill, we pass it as is
         """
+        self.__refuse_null()
         Ffmpeg.log.debug(f'Started {self.p}')
         if size_allow is not None:
-            inefficient = False
-        check_time = size_allow is None or (size_allow is not None and progress_bar is not None)
+            if file_out is None:
+                self.p.kill()
+                raise ValueError('No path given but trying to limit the file size')
         chars = []
         while True:
             Checker.is_end(self.p)
-            if size_allow is not None and file_out.stat().st_size > size_allow:
-                p.kill()
+            if size_allow and file_out.stat().st_size >= size_allow:
+                self.p.kill()
                 return True
             char = self.p.stderr.read(100)
             if char == b'':
                 break
             chars.append(char)
-        log = b''.join(chars).split(b'\n')
-        for paragraph_id, paragraph in enumerate(reversed(log)):
-            lines = paragraph.split(b'\r')
-            if len(lines) > 1:
-                break
-        m = Ffmpeg.reg_complete[stream_type].search(log[-paragraph_id])
-        if m:
-            pass
-        m = None
-        t = None
+        last, lines = Ffmpeg.__log_cutter(chars)
+        if file_out is None:
+            s = Ffmpeg.reg_complete[stream_type].search(last)
+        else:
+            s = file_out.stat().st_size
+        t = size_allow is None
         for line in reversed(lines): # This line has frame=xxx, fps=xxx, size=xxx
-            if m is None:
-                m = Ffmpeg.reg_running.search(line)
+            if s is None:
+                s = Ffmpeg.reg_running.search(line)
             if t is None:
                 t = Ffmpeg.reg_time.search(line)
-            if m is not None and t is not None:
+            if s is not None and t is not None:
                 break
-
-
-            
-
-
-
-        while self.p.poll() is None:
-            Checker.is_end(self.p)
-            chars = []
-            if chars:
-                line = b''.join(chars).decode('utf-8')
-                if check_time:
-                    m = Ffmpeg.reg_time.search(line)
-                    if m:
-                        t = m[1]
-                        if progress_bar is not None:
-                            t = time_from_str(t)
-                            percent = t/target_time
-                            progress_bar.set_fraction(t, target_time)
-                if size_allow is not None:
-                    m = Ffmpeg.reg_running.search(line)
-                    if m:
-                        size_produded = int(m[1])
-                        if size_produded >= size_allow or (
-                            check_time and t > Ffmpeg.time_ten_seconds and size_produded/size_allow >= percent):
-                            inefficient = True
-                            self.p.kill()
-                            break
-                    pass
+        size = file_out.stat().st_size
+        if size_allow:
+            if size >= size_allow:
+                return True
             else:
-                self.p.kill()
-                break
+                return False
         Ffmpeg.log.debug(f'Ended {self.p}')
-        m = Ffmpeg.reg_running.search(line)
-        if m:
-            s = int(m[1])
-            if size_allow is not None and s >= size_allow:
-                inefficient = True
-        else:
-            m = Ffmpeg.reg_complete[stream_type].search(line)
-            if m:
-                s = int(m[1])
-                if size_allow is not None and s >= size_allow:
-                    inefficient = True
-        if progress_bar is not None:
-            progress_bar.set(1)
-        self.returncode = self.p.wait()
-        if size_allow is None:
-            if progress_bar is None:
-                return self.returncode, time_from_str(t), s
-            else:
-                return self.returncode, t, s
-        else:
-            return inefficient
+        return self.p.wait(), Duration(t), size
 
 
 class Video:
-    def __init__(self, path):
-        self.path = path
-        p = Ffprobe(('-show_format', '-show_streams', '-select_streams', 'V', '-of', 'json', i))
+    def __init__(self, path:pathlib.Path):
+        self.raw = path
+        self.name = path.stem
+        p = Ffprobe(('-show_format', '-show_streams', '-select_streams', 'V', '-of', 'json', path))
         if p.returncode == 0:
             j = json.loads(p.stdout)
             j_format =  j['format']['format_name']
             if not (j_format.endswith('_pipe') or j_format in ('image2', 'tty')) and j['streams']:
-                streams = []
+                self.streams = []
+                self.audios = []
+                self.videos = []
                 video = False
                 for stream_id, stream in enumerate(
-                    json.loads(Ffprobe(('-show_streams', '-of', 'json', i)).stdout)['streams']
+                    json.loads(Ffprobe(('-show_self.streams', '-of', 'json', i)).stdout)['self.streams']
                 ):
                     #log_scanner.info(f'Getting stream information for stream {stream_id} from {i}')
                     stream_type = stream['codec_type'] 
                     if stream_type in ('video', 'audio'):
                         stream_duration, stream_size = Stream.get_duration_and_size(path, stream_id, stream_type)
-                        streams.append(Stream(stream_id, stream_type, stream_duration, stream_size, stream))
+                        stream = Stream(stream_id, stream_type, stream_duration, stream_size, stream)
+                        if stream_type == 'video':
+                            self.videos.append(stream)
+                        else:
+                            self.audios.append(stream)
+                        self.streams.append(stream)
                     else:
-                        streams.append(None)
+                        self.streams.append(None)
                     if not video and stream_type == 'video':
                         video = True
                 if video:
-                    self.streams = streams
-                    self.len = len(streams)
+                    self.__len = len(self.streams)
                     return
         raise NotVideo
 
@@ -577,28 +634,170 @@ class Video:
         return iter(self.streams)
 
     def __str__(self):
-        return str(self.path)
+        return str(self.raw)
 
     def __repr__(self):
-        return f'{self.__class__.__module__}.{self.__class__.__qualname__}({self.path})'
+        return f'{self.__class__.__module__}.{self.__class__.__qualname__}({self.raw})'
 
     def __len__(self):
-        return self.len
+        return self.__len
 
     def __getitem__(self, key):
         if not isinstance(key, int) and (key > self.len or key < -self.len - 1):
             raise KeyError(f'{key} is not a valid stream id')
         return self.streams[key]
 
+    def prepare(self, dir_work_sub:pathlib.Path):
+        self.work = dir_work_sub
+        self.archive = dir_archive / f'{self.name}.mkv'  # It's determined here so the output path can be updated before encoding
+        self.preview = dir_preview / f'{self.name}.mkv'
+        self.threads_archive, self.threads_preview, self.threads_muxer, streams_archive, streams_preview, audios =  ([] for i in range(6))
+        videos = {}
+        amix = len(self.audios) > 1
+        audios_size = 0
+        audios_duration = Duration()
+        work_archive = not self.archive.exists()
+        work_preview = not self.preview.exists()
+        for stream in self.streams:
+            if stream is None:
+                if work_archive:
+                    streams_archive.append(None)
+                if work_preview:
+                    streams_preview.append(None)
+            else:
+                if work_archive:
+                    threads_archive.append(threading.Thread(target=stream.encode, args=('archive')))
+                    threads_archive[-1].start()
+                if work_preview and not amix:
+                    threads_preview.append(threading.Thread(target=stream.encode, args=('preview')))
+                    threads_preview[-1].start()
+        if amix:
+            threads_preview.append(threading.Thread(target=self.audios[0].encode, args=('preview', True)))
+            self.amix()
+        if len(self.videos) == 1:
+            file_screenshot = dir_screenshot / f'{i.stem}.jpg'
+            if not file_screenshot.exists():
+                threads_screenshot.append(threading.Thread(target=screenshot, args=(i, dir_work_sub / f'{i.stem}_screenshot.jpg', file_screenshot, stream_id, stream['duration'], stream['width'], stream['height'], stream['rotation'])))
+                log_main.debug(f'Spawned thread {threads_screenshot[-1]}')
+                threads_screenshot[-1].start()
+        else:
+            dir_screenshot_sub = dir_screenshot / i.stem
+            if not dir_screenshot_sub.exists():
+                dir_screenshot_sub.mkdir()
+            for i_r, j_r in videos.items():
+                file_screenshot = dir_screenshot_sub / f'{i.stem}_{i_r}.jpg'
+                if not file_screenshot.exists():
+                    threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot_{i_r}.jpg', file_screenshot, i_r, j_r['duration'], j_r['width'], j_r['height'], j_r['rotation'])))
+                    log_main.debug(f'Spawned thread {threads_screenshot[-1]}')
+                    threads_screenshot[-1].start()
+
+    def amix(self, audios):
+        pass
+
+    def muxer(
+        file_raw: pathlib.Path,
+        file_cache: pathlib.Path,
+        file_out: pathlib.Path,
+        streams: list,
+        threads: list = None,
+    ):
+        """Muxing finished video/audio streams and non va streams from raw file to a new mkv container
+
+        muxer itself (scopte: child/muxer)
+
+        scope: child-main
+            As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
+                join
+                check_end
+                ffmpeg_dumb_poller
+
+            Should that, return to end this thread
+        """
+        log = LoggingWrapper(f'[{file_raw.name}]')
+        try:
+            if threads is not None and threads:
+                for thread in threads:
+                    Checker.join(thread)
+            inputs = ['-i', file_raw]
+            input_id = 0
+            mappers = []
+            for stream_id, stream in enumerate(streams):
+                Checker.is_end()
+                if stream is None:
+                    mappers += ['-map', f'0:{stream_id}']
+                else:
+                    inputs += ['-i', stream]
+                    input_id += 1
+                    mappers += ['-map', f'{input_id}']
+            log.info(f'Muxing to {file_out}...')
+            args = (*inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_cache)
+            while Ffmpeg(args, null=True).poll_dumb():
+                Checker.is_end()
+                log.warning(f'Muxing failed, retry that later')
+                Checker.sleep(5)
+        except EndExecution:
+            log.debug(f'Ending thread {threading.current_thread()}')
+            return
+        shutil.move(file_cache, file_out)
+        log.info(f'Muxed to {file_out}')
+
+
+
+    def cleaner(
+        dir_work_sub: pathlib.Path,
+        file_raw: pathlib.Path,
+        threads: list
+    ):
+        """Cleaning the work directory and the raw file
+
+        cleaner itself (scope: child/cleaner)
+
+        scope: child-main
+            As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
+                join
+                check_end
+                db_write
+
+            Should that, or the end_work flag be captured, return to end this thread
+        """
+        log = LoggingWrapper(f'[{file_raw.name}]')
+        try:
+            for thread in threads:
+                Checker.join(thread)
+            log.info(f'Cleaning input and {dir_work_sub}...')
+            shutil.rmtree(dir_work_sub)
+            file_raw.unlink()
+            Checker.is_end()
+            Database.remove(file_raw)
+            Pool.Work.remove(file_raw)
+        except EndExecution:
+            log.debug(f'Ending thread {threading.current_thread()}')
+            return
+        log.info('Done')
+
 
 class Stream:
+    # VIDEO = 0
+    # AUDIO = 1
+    # SUBTITLE = 2
+    # DATA = 3
+    # ATTACHMENT = 4
     lossless = {
         'video': ('012v', '8bps', 'aasc', 'alias_pix', 'apng', 'avrp', 'avui', 'ayuv', 'bitpacked', 'bmp', 'bmv_video', 'brender_pix', 'cdtoons', 'cllc', 'cscd', 'dpx', 'dxa', 'dxtory', 'ffv1', 'ffvhuff', 'fits', 'flashsv', 'flic', 'fmvc', 'fraps', 'frwu', 'gif', 'huffyuv', 'hymt', 'lagarith', 'ljpeg', 'loco', 'm101', 'magicyuv', 'mscc', 'msp2', 'msrle', 'mszh', 'mwsc', 'pam', 'pbm', 'pcx', 'pfm', 'pgm', 'pgmyuv', 'pgx', 'png', 'ppm', 'psd', 'qdraw', 'qtrle', 'r10k', 'r210', 'rawvideo', 'rscc', 'screenpresso', 'sgi', 'sgirle', 'sheervideo', 'srgc', 'sunrast', 'svg', 'targa', 'targa_y216', 'tiff', 'tscc', 'utvideo', 'v210', 'v210x', 'v308', 'v408', 'v410', 'vble', 'vmnc', 'wcmv', 'wrapped_avframe', 'xbm', 'xpm', 'xwd', 'y41p', 'ylc', 'yuv4', 'zerocodec', 'zlib', 'zmbv'),
         'audio': ('alac', 'ape', 'atrac3al', 'atrac3pal', 'dst', 'flac', 'mlp', 'mp4als', 'pcm_bluray', 'pcm_dvd', 'pcm_f16le', 'pcm_f24le', 'pcm_f32be', 'pcm_f32le', 'pcm_f64be', 'pcm_f64le', 'pcm_lxf', 'pcm_s16be', 'pcm_s16be_planar', 'pcm_s16le', 'pcm_s16le_planar', 'pcm_s24be', 'pcm_s24daud', 'pcm_s24le', 'pcm_s24le_planar', 'pcm_s32be', 'pcm_s32le', 'pcm_s32le_planar', 'pcm_s64be', 'pcm_s64le', 'pcm_s8', 'pcm_s8_planar', 'pcm_sga', 'pcm_u16be', 'pcm_u16le', 'pcm_u24be', 'pcm_u24le', 'pcm_u32be', 'pcm_u32le', 'pcm_u8', 'ralf', 's302m', 'shorten', 'tak', 'truehd', 'tta', 'wmalossless')
     }
 
     @staticmethod
-    def get_duration_and_size(path: pathlib.Path, s_id: int, s_type: str):
+    def get_duration(path:pathlib.Path, stream_id:int=0):
+        for _ in range(3):
+            r, t = Ffmpeg(('-i', path, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), ).poll_time()
+            if r == 0:
+                return t
+            Checker.sleep(5)
+        return Duration(0)
+
+    @staticmethod
+    def get_duration_and_size(path: pathlib.Path, stream_id: int=0, stream_type: int=0):
         """Get duration and size from a stream from a media file, just a wrapper, 
 
         used in stream_info (scope: main)
@@ -610,9 +809,12 @@ class Stream:
         scope: child
             The EndExecution exception could be raised by ffmpeg_time_size_poller, we pass it as is
         """
-        #ffmpeg.popen('-i', media, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-')
-        r, t, s = Ffmpeg(('-i', path, '-c', 'copy', '-map', f'0:{s_id}', '-f', 'null', '-'), ).poll_time_size(s_type)
-        return t, s
+        for _ in range(3):
+            r, t, s = Ffmpeg(('-i', path, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), ).poll_time_size(stream_type)
+            if r == 0:
+                return t, s
+            Checker.sleep(5)
+        return Duration(0), 0
 
     def __init__(self, parent:Video, stream_id:int, stream_type:str, stream_duration:Duration, stream_size:int, stream_info:dict):
         self.parent = parent
@@ -629,89 +831,303 @@ class Stream:
             else:
                 self.rotation = None
 
-    def copy(self, log:LoggingWrapper, dir_work_sub:pathlib.Path, prefix:str, file_out:pathlib.Path, file_done:pathlib.Path):
-        """Copy a stream from a media file as is, 
+    def __sum_parts(self):
+        self.__log.warning(f'Finding all failed parts of {self.__file_out}')
+        suffix = 0
+        file_check = self.parent.work / f'{self.__prefix}_{suffix}.nut'
+        while file_check.exists():
+            Checker.is_end()
+            self.__log.warning(f'Found a failed part: {file_check}')
+            size_delta = file_check.stat().st_size
+            if size_delta:
+                time_delta = Stream.get_duration(file_check)
+                if time_delta:
+                    self.__start += time_delta
+                    self.__size_exist += size_delta
+                    self.__log.warning(f'Recovered: {file_check}, Duration: {time_delta}, size: {size_delta}. Total: Duration:{self.__start}, size: {self.__size_exist}')
+                    self.__concat_list.append(file_check.name)
+                else:
+                    self.__log.warning(f'Unable to recovery: {file_check}, skipped')
+            suffix += 1
+            file_check = self.parent.work / f'{self.__prefix}_{suffix}.nut'
+        self.__log.info(f'Recovered last part will be saved to {file_check}')
+        return file_check
 
-        used in encoder (scope: child/encoder)
+    def __extract_frames(self):
+        file_work = self.__sum_parts()
+        file_recovery = self.parent.work / f'{self.__prefix}_recovery.nut'
+        for _ in range(3):
+            Checker.is_end()
+            if self.type == 'video':
+                self.__log.info('Checking if the interrupt file is usable')
+                p = Ffprobe(('-show_frames', '-select_streams', 'v:0', '-of', 'json', self.__file_out))
+                if p.returncode == 0:
+                    self.__log.info('Analyzing available frames')
+                    frames = json.loads(p.stdout)['frames']
+                    self.__log.debug(f'{len(frames)} frames found in {self.__file_out}')
+                    frame_last = 0
+                    for frame_id, frame in enumerate(reversed(frames)):
+                        Checker.is_end()
+                        if frame['key_frame']:
+                            frame_last = len(frames) - frame_id - 1
+                            break
+                    self.__log.debug(f'Last GOP start at frame: {frame_last}')
+                    if frame_last:
+                        self.__log.info(f'Recovering {frame_last} usable video frames')
+                        p = Ffmpeg(('-i', self.__file_out, '-c', 'copy', '-map', '0', '-y', '-vframes', str(frame_last), file_recovery))
+                    else:
+                        self.__log.info('No frames usable')
+                        break
+            else:
+                self.__log.info('Recovering usable audio frames')
+                p = Ffmpeg(('-i', self.__file_out, '-c', 'copy', '-map', '0', '-y', file_recovery))
+            if isinstance(p, Ffmpeg):
+                r, t = p.poll_time(self.type)
+                if r:
+                    self.__log.warning('Recovery failed, retrying that later')
+                else:
+                    self.__start += t
+                    self.__size_exist += file_recovery.stat().st_size
+                    shutil.move(file_recovery, file_work)
+                    self.__concat_list.append(file_work.name)
+                    self.__log.info(f'{t} of failed transcode recovered. Total: duration:{self.__start}, size{self.__size_exist}')
+                    break
 
-        scope: child
-            The EndExecution exception could be raised by ffmpeg_dumb_poller and check_end, we pass it as is
-        """
-        log.info('Transcode inefficient, copying raw stream instead')
-        file_copy = dir_work_sub / f'{prefix}_copy.nut'
+    def __recovery(self):
+        if self.__file_out.exists():
+            self.__size_exist = self.__file_out.stat().st_size
+            if self.__size_exist:
+                self.__log.warning('Output already exists, potentially broken before, trying to recover it')
+                time_delta = Stream.get_duration(self.__file_out)
+                if time_delta:
+                    self.__log.debug(f'Recovery needed: {self.__file_out}')
+                    if abs(self.duration - time_delta) < 1:
+                        self.__log.info('Last transcode successful, no need to transcode')
+                        self.__file_done.touch()
+                        return
+                    self.__extract_frames()
+                    self.__file_out.unlink()
+                    with Checker.context(open(self.__file_concat_pickle, 'wb')) as f:
+                        pickle.dump((self.__concat_list, self.__start, self.__size_exist), f)
+            self.__file_out.unlink()      
+        # Check if recovered last time
+        if not self.__concat_list and self.__file_concat_pickle.exists():
+            with self.__file_concat_pickle.open('rb') as f:
+                self.__concat_list, self.__start, self.__size_exist = pickle.load(f)
+
+    def __copy(self):
+        self.__log.info('Transcode inefficient, copying raw stream instead')
+        file_copy = self.parent.work / f'{self.__prefix}_copy.nut'
         args = ('-i', self.parent.path, '-c', 'copy', '-map', f'0:{self.id}', '-y', file_copy)
         while Ffmpeg(args, null=True).poll_dumb():
             Checker.is_end()
-            log.warning('Stream copy failed, trying that later')
+            self.__log.warning('Stream copy failed, trying that later')
             Checker.sleep(5)
-        shutil.move(file_copy, file_out)
-        log.info('Stream copy done')
-        file_done.touch()
+        shutil.move(file_copy, self.__file_out)
+        self.__log.info('Stream copy done')
+        self.__file_done.touch()
 
-
-def concat(log, prefix, concat_list, file_out, file_done):
-    """Concating multiple parts of a media file
-
-    used in encoder (scope: child/encoder)
-
-    scope: child
-        The EndExecution exception could be raised by check_end and ffmpeg_dumb_poller, we pass it as is
-    """
-    log.info('Transcode done, concating all parts')
-    file_list = pathlib.Path(
-        dir_work_sub,
-        f'{prefix}.list'
-    )
-    file_concat = pathlib.Path(
-        dir_work_sub,
-        f'{prefix}_concat.nut'
-    )
-    with file_list.open('w') as f:
-        for file in concat_list:
+    def __concat(self):
+        self.__log.info('Transcode done, concating all parts')
+        file_list = self.parent.work / f'{self.__prefix}.list'
+        file_concat = self.parent.work / f'{self.__prefix}_concat.nut'
+        with Checker.context(open(file_list, 'w')) as f:
+            for file in self.__concat_list:
+                Checker.is_end()
+                f.write(f'file {file}\n')
+        args = ('-f', 'concat', '-safe', '0', '-i', file_list, '-c', 'copy', '-map', '0', '-y', file_concat)
+        while Ffmpeg(args, null=True).poll_dumb():
             Checker.is_end()
-            f.write(f'file {file}\n')
-    args = ('-f', 'concat', '-safe', '0', '-i', file_list, '-c', 'copy', '-map', '0', '-y', file_concat)
-    while Ffmpeg(args, null=True).poll_dumb():
-        Checker.is_end()
-        log.warning('Concating failed, trying that later')
-        Checker.sleep(5)
-    shutil.move(file_concat, file_out)
-    log.info('Concating done')
-    file_done.touch()
+            self.__log.warning('Concating failed, trying that later')
+            Checker.sleep(5)
+        shutil.move(file_concat, self.__file_out)
+        self.__log.info('Concating done')
+        self.__file_done.touch()
 
+    def __args_constructor(self):
+        args_in = ('-ss', str(self.__start), '-i', self.parent.raw)
+        if self.type != 'audio' and encode_type != 'preview':
+            args_map = ('-map', f'0:{self.id}')
+        args_out = ('-y', self.__file_out)
+        if self.type == 'video':
+            if encode_type == 'archive':
+                args = (*args_in,  *Ffmpeg.args_video_archive, *args_map, *args_out)
+            else:
+                if self.width > 1000 and self.height > 1000:
+                    stream_width = self.width
+                    stream_height = self.height
+                    while stream_width > 1000 and stream_height > 1000:
+                        stream_width //= 2
+                        stream_height //= 2
+                    args=(*args_in, *Ffmpeg.args_video_preview, *args_map, '-filter:v', f'scale={stream_width}x{stream_height}', *args_out)
+                else:
+                    args=(*args_in, *Ffmpeg.args_video_preview, *args_map, *args_out)
+        else: # Audio
+            if encode_type == 'archive':
+                args=(*args_in, *Ffmpeg.args_audio_archive, *args_map, *args_out)
+            else:
+                if self.id == 1:
+                    args=(*args_in, *Ffmpeg.args_audio_preview, *args_out)
+                else:
+                    args=(*args_in, *Ffmpeg.args_audio_preview, '-filter_complex', f'amix=inputs={len(self.parent)}:duration=longest', *args_out)
+        self.__args = args
 
-def args_constructor(start, file_raw, file_out, stream_id, stream_type, encode_type, stream_width, stream_height):
-    """Counstructing ffmpeg args for encoder
-    
-    used in encoder (scope: child/encoder)
-    
-    scope: child
-        No exception should be raised, the outer thread is ended by other things
-    """
-    args_in = ('-hwaccel', 'auto', '-ss', str(start), '-i', file_raw)
-    args_map = ('-map', f'0:{stream_id}')
-    args_out = ('-y', file_out)
-    if stream_type == 'video':
-        if encode_type == 'archive':
-            return (*args_in,  '-c:v', 'libx264', '-crf', '18', '-preset', 'veryslow', *args_map, *args_out)
+    def encode(self, encode_type:str, amix:bool=False):
+        """Encoding certain stream in a media file
+
+        encoder itself (scope: child/encoder)
+
+        scope: child-main
+            As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
+                get_duration_and_size
+                delta_adder
+                ffmpeg_dumb_poller
+                ffmpeg_time_size_poller
+                stream_copy
+                concat
+                wait_cpu
+
+            Should that, return to end this thread
+        """
+        self.__file_out = self.parent.work / f'{self.parent.name}_{encode_type}_{self.id}_{self.type}.nut'
+        self.__file_done = self.parent.work / f'{self.parent.name}_{encode_type}_{self.id}_{self.type}.done'
+        if amix:
+            self.__log = LoggingWrapper(f'[{self.parent.name}] E:P S:Amix')
+            self.__prefix = f'{self.parent.name}_preview_audio'
         else:
-            args_codec = ('-c:v', 'libsvtav1', '-qp', '63', '-preset', '8')
-            if stream_width > 1000 and stream_height > 1000:
-                while stream_width > 1000 and stream_height > 1000:
-                    stream_width //= 2
-                    stream_height //= 2
-                return (*args_in,  *args_codec, *args_map, '-filter:v', f'scale={stream_width}x{stream_height}', *args_out)
-            else:
-                return (*args_in,  *args_codec, *args_map, *args_out)
-    else: # Audio
-        if encode_type == 'archive':
-            return (*args_in, '-c:a', 'libfdk_aac', '-vbr', '5', *args_map, *args_out)
+            self.__log = LoggingWrapper(f'[{self.parent.name}] E:{encode_type[:1].capitalize()} S:{self.id}:{self.type[:1].capitalize()}')
+            self.__prefix = f'{self.parent.name}_{encode_type}_{self.id}_{self.type}'
+        self.__log.info('Work started')
+        self.__file_concat_pickle = self.parent.work / f'{self.__prefix}_concat.pkl'
+        check_efficiency = encode_type == 'archive'  and not self.lossless 
+        self.__start = Duration()
+        self.__size_exist = 0
+        self.__concat_list = []
+        try:
+            # Recovery
+            self.__recovery()
+            # If recovered, check if there is the need to continue recovery
+            if self.__concat_list:
+                # We've already transcoded this
+                if check_efficiency and self.__size_exist > self.size * 0.9:
+                    self.__copy()
+                    return 
+                if self.__start >= self.duration or self.duration - self.__start < Duration(1):
+                    self.__concat()
+                    return
+            # Real encoding happenes below
+            
+            if check_efficiency:
+                size_allow = self.size * 0.9 - self.__size_exist
+            self.__args_constructor()
+            while True:
+                self.__log.info('Transcode started')
+                Checker.is_end()
+                if self.type == 'video':
+                    Pool.wait(self.__log, encode_type)
+                p = Ffmpeg(self.__args)
+                if check_efficiency:
+                    r, inefficient = p.poll_size(self.type, size_allow, self.__file_out)
+                    if inefficient:
+                        self.__copy()
+                        return
+                else:
+                    p.poll_dumb()
+                if p.returncode == 0:
+                    if self.__concat_list:
+                        self.__concat_list.append(self.__file_out.name)
+                        self.__concat()
+                    else:
+                        self.__log.info('Transcode done')
+                        self.__file_done.touch()
+                    break
+                self.__log.warning(f'Transcode failed, returncode: {p.returncode}, retrying that later')
+                Checker.sleep(5)
+        except EndExecution:
+            self.__log.debug(f'Ending thread {threading.current_thread()}')
+            return
+
+    def screenshot(self, dir_screenshot_sub: pathlib.Path=None):
+        """Taking screenshot for video stream, according to its duration, making mosaic screenshot
+
+        screenshooter itself (scope: child/screenshooter)
+
+        scope: child-main
+            As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
+                cpu_wait
+                ffmpeg_dumb_poller
+                check_end
+
+            Should that, return to end this thread
+        """
+        if dir_screenshot_sub is None:
+            name = f'{self.parent.name}.jpg'
+            file_out = dir_screenshot / name
+            file_work = self.parent.work / name
         else:
-            args_codec = ('-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a')
-            if stream_id == 1:
-                return (*args_in, *args_codec, *args_out)
+            name = f'{self.parent.name}_{self.id}.jpg'
+            file_out = dir_screenshot_sub / name
+            file_work = self.parent.work / name
+        args_out = ('-vsync', 'passthrough', '-frames:v', '1', '-y', file_work)
+        length = clamp(int(math.log(self.duration.seconds()/2 + 1)), 1, 10)
+        if length == 1:
+            log = LoggingWrapper(f'[{self.parent.name}] S')
+            args = ('-ss', str(self.duration/2), '-i', self.parent.path, '-map', f'0:{self.id}', *args_out)
+            prompt = 'Taking screenshot, single frame'
+        else:
+            log = LoggingWrapper(f'[{self.parent.name}] S:{self.id}')
+            if self.rotation in (90, -90):
+                stream_width, stream_height = stream_height, stream_width
+            width = stream_width * length
+            height = stream_height * length
+            if width > 65535 or length > 65535:
+                while width > 65535 or length > 65535:
+                    Checker.is_end()
+                    width //= 2
+                    length //= 2
+                arg_scale = f',scale={width}x{height}'
             else:
-                return (*args_in, *args_codec, '-filter_complex', f'amix=inputs={stream_id}:duration=longest', *args_out)
+                arg_scale = ''
+            tiles = length**2
+            time_delta = self.duration / tiles
+            if self.duration < tiles:
+                args = (
+                    '-i', self.parent.path, '-map', f'0:{self.id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta.seconds()}),tile={length}x{length}{arg_scale}', *args_out
+                )
+            else:
+                time_start = Duration(0)
+                args_input = []
+                args_position = []
+                args_mapper = []
+                file_id = 0
+                for i in range(length):
+                    for j in range(length):
+                        Checker.is_end()
+                        args_input.extend(('-ss', str(time_start), '-i', self.parent.path))
+                        args_mapper.append(f'[{file_id}:{self.id}]')
+                        args_position.append(f'{j*stream_width}_{i*stream_height}')
+                        time_start += time_delta
+                        file_id += 1
+                arg_mapper = ''.join(args_mapper)
+                arg_position = '|'.join(args_position)
+                args = (
+                    *args_input, '-filter_complex', f'{arg_mapper}xstack=inputs={tiles}:layout={arg_position}{arg_scale}', *args_out
+                )
+            prompt = f'Taking screenshot, {length}x{length} grid, for each {time_delta} segment, {width}x{height} res'
+        try:
+            while True:
+                Pool.wait(log, 'ss')
+                log.info(prompt)
+                if Ffmpeg(args, null=True).poll_dumb():
+                    log.warning('Failed to screenshoot, retring that later')
+                else:
+                    break
+                Checker.sleep(5)
+        except EndExecution:
+            log.debug(f'Ending thread {threading.current_thread()}')
+            return
+        log.info('Screenshot taken')
+        shutil.move(file_work, file_out)
 
 
 def wait_close(file_raw:pathlib.Path):
@@ -772,180 +1188,12 @@ def scan_dir(d: pathlib.Path):
                 try:
                     db_entry = Video(i)
                     log_scanner.info(f'Added {i} to db')
-                    log_scanner.debug(f'{i} streams: {streams}')
-                    
+                    log_scanner.debug(f'{i} streams: {db_entry.streams}')
                 except NotVideo:
                     db_entry = None
                 except EndExecution:
                     return
             db.add(i, db_entry)
-
-
-# def delta_adder(file_check, stream_type, start, size_exist):
-#     """Get duration and size from a file, add them to existing value, return the total
-
-#     used in encoder (scope: child/encoder)
-
-#     scope: child
-#         The EndExecution exception could be raised by get_duration_and_size, we pass it as is
-#     """
-#     time_delta, size_delta = get_duration_and_size(file_check, 0, stream_type)
-#     return start + time_delta, size_exist + size_delta
-
-
-def encoder(
-    dir_work_sub: pathlib.Path,
-    stream: Stream, file_out: pathlib.Path, file_done: pathlib.Path,
-    encode_type: str, 
-):  
-    """Encoding certain stream in a media file
-
-    encoder itself (scope: child/encoder)
-
-    scope: child-main
-        As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
-            get_duration_and_size
-            delta_adder
-            ffmpeg_dumb_poller
-            ffmpeg_time_size_poller
-            stream_copy
-            concat
-            wait_cpu
-
-        Should that, return to end this thread
-    """
-    log = LoggingWrapper(f'[{stream.path.name}]')
-    try:
-        if encode_type == 'preview' and stream.type == 'audio':
-            log = LoggingWrapper(f'[{stream.path.name}] E:P S:A:{stream.id}')
-        else:
-            log = LoggingWrapper(f'[{stream.path.name}] E:{encode_type[:1].capitalize()} S:{stream.id}:{stream.type[:1].capitalize()}')
-        log.info('Work started')
-        if encode_type == 'preview' and stream.type == 'audio':
-            prefix = f'{stream.path.stem}_preview_audio'
-        else:
-            prefix = f'{stream.path.stem}_{encode_type}_{stream.id}_{stream.type}'
-        file_concat_pickle = dir_work_sub / f'{prefix}_concat.pkl'
-        start = time_zero
-        size_exist = 0
-        concat_list = []
-        check_efficiency = encode_type == 'archive'  and not stream.lossless 
-        if file_out.exists() and file_out.stat().st_size:
-            log.warning('Output already exists, potentially broken before, trying to recover it')
-            time_delta, size_delta = Stream.get_duration_and_size(file_out, 0, stream.type)
-            log.debug(f'Recovery: {file_out}, stream.duration: {time_delta}, size: {size_delta}kB')
-            if abs(stream.duration - time_delta) < time_second:
-                log.info('Last transcode successful, no need to transcode')
-                file_done.touch()
-                return
-            suffix = 0
-            file_check = dir_work_sub / f'{prefix}_{suffix}.nut'
-            while file_check.exists() and file_check.stat().st_size:
-                Checker.is_end()
-                time_delta, size_delta = Stream.get_duration_and_size(file_check, 0, stream.type)
-                start += time_delta
-                size_exist += size_delta
-                log.warning(f'Recovery: {file_check}, stream.duration: {time_delta}, size: {size_delta}kB. Total: stream.duration:{start}, size: {size_exist}kB')
-                concat_list.append(file_check.name)
-                suffix += 1
-                file_check = dir_work_sub / f'{prefix}_{suffix}.nut'
-            log.info(f'Recovering last part to {file_check}')
-            file_recovery = dir_work_sub / f'{prefix}_recovery.nut'
-            poll = False
-            if stream.type == 'video':
-                log.info('Checking if the interrupt file is usable')
-                p = Ffprobe(('-show_frames', '-select_streams', 'v:0', '-of', 'json', file_out))
-                if p.returncode == 0:
-                    log.info('Analyzing available frames')
-                    frames = json.loads(p.stdout)['frames']
-                    log.debug(f'{len(frames)} frames found in {file_out}')
-                    frame_last = 0
-                    for frame_id, frame in enumerate(reversed(frames)):
-                        Checker.is_end()
-                        if frame['key_frame']:
-                            frame_last = len(frames) - frame_id - 1
-                            break
-                    log.debug(f'Last GOP start at frame: {frame_last}')
-                    if frame_last:
-                        log.info(f'{frame_last} frames seem usable, trying to recovering those')
-                        poll = True
-                        p = Ffmpeg(('-i', file_out, '-c', 'copy', '-map', '0', '-y', '-vframes', str(frame_last), file_recovery))
-                    else:
-                        log.info('No frames usable')
-            else:
-                poll = True
-                p = Ffmpeg(('-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery))
-            if poll:
-                r, t, s = p.poll_time_size(stream.type)
-                if r:
-                    log.warning('Recovery failed')
-                else:
-                    shutil.move(file_recovery, file_check)
-                    start += t
-                    size_exist += s
-                    concat_list.append(file_check.name)
-                    log.info(f'{t} of failed transcode recovered. Total: stream.duration:{start}, size{size_exist}')
-            file_out.unlink()
-            with file_concat_pickle.open('wb') as f:
-                pickle.dump((concat_list, start, size_exist), f)
-        if not concat_list and file_concat_pickle.exists():
-            with file_concat_pickle.open('rb') as f:
-                concat_list, start, size_exist = pickle.load(f)
-        if concat_list:
-            # We've already transcoded this
-            if check_efficiency and stream.size and size_exist > stream.size * 0.9:
-                stream.copy(log, dir_work_sub, prefix, file_out, file_done)
-                return 
-            if start >= stream.duration or stream.duration - start < time_second:
-                log.info(f'Seems already finished, concating all failed parts')
-                concat(log, prefix, concat_list, file_out, file_done)
-                return
-        # Real encoding happenes below
-        if check_efficiency:
-            size_allow = stream.size * 0.9 - size_exist
-        args = args_constructor(start, stream.path, file_out, stream.id, stream.type, encode_type, stream.width, stream.height)
-        target_time = stream.duration - start
-        while True:
-            Checker.is_end()
-            if stream.type == 'video':
-                Pool.wait(log, encode_type)
-            p = Ffmpeg(args)
-            progress_bar = ProgressBar(log)
-            if check_efficiency:
-                if p.poll_time_size(stream.type, size_allow, progress_bar, target_time):  # return ture for inefficient
-                    stream.copy(log, dir_work_sub, prefix, file_out, file_done)
-                    return
-            else:
-                p.poll_time_size(stream.type, progress_bar=progress_bar, target_time=target_time)
-            #CleanPrinter.print(f'{prompt_title} waiting to end')
-            if p.returncode == 0:
-                if concat_list:
-                    concat_list.append(file_out.name)
-                    concat(log, prefix, concat_list, file_out, file_done)
-                else:
-                    log.info('Transcode done')
-                    file_done.touch()
-                #CleanPrinter.print(f'{prompt_title} ended {file_done}')
-                break
-            log.info(f'Transcode failed, returncode: {p.returncode}, retrying that later')
-            Checker.sleep(5)
-    except EndExecution:
-        log.debug(f'Ending thread {threading.current_thread()}')
-        return
-
-
-def join(thread: threading.Thread):
-    """Cleanly join a thread, just an invoker so that the work_end flag can be captured
-
-    used in muxer (scope: child/muxer)
-    used in cleaner (scope: child/cleaner)
-
-    scope: child
-        The EndExecution flag could be raised by check_end, we pass it as is
-    """
-    Checker.is_end()
-    thread.join()
-    Checker.is_end()
 
 
 def muxer(
@@ -971,7 +1219,7 @@ def muxer(
     try:
         if threads is not None and threads:
             for thread in threads:
-                join(thread)
+                Checker.join(thread)
         inputs = ['-i', file_raw]
         input_id = 0
         mappers = []
@@ -996,90 +1244,6 @@ def muxer(
     log.info(f'Muxed to {file_out}')
 
 
-def screenshooter(
-    file_raw: pathlib.Path,
-    file_cache: pathlib.Path,
-    file_out: pathlib.Path,
-    stream_id: int,
-    duration: datetime.timedelta,
-    stream_width: int,
-    stream_height: int,
-    rotation: int
-):
-    """Taking screenshot for video stream, according to its duration, making mosaic screenshot
-
-    screenshooter itself (scope: child/screenshooter)
-
-    scope: child-main
-        As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
-            cpu_wait
-            ffmpeg_dumb_poller
-            check_end
-
-        Should that, return to end this thread
-    """
-    try:
-        args_hwaccel = ('-hwaccel', 'auto')
-        args_out = ('-vsync', 'passthrough', '-frames:v', '1', '-y', file_cache)
-        length = clamp(int(math.log(duration.total_seconds()/2 + 1)), 1, 10)
-        if length == 1:
-            log = LoggingWrapper(f'[{file_raw.name}]')
-            args = (*args_hwaccel, '-ss', str(duration/2), '-i', file_raw, '-map', f'0:{stream_id}', *args_out)
-            prompt = 'Taking screenshot, single frame'
-        else:
-            log = LoggingWrapper(f'[{file_raw.name}] S:{stream_id}')
-            if rotation in (90, -90):
-                stream_width, stream_height = stream_height, stream_width
-            width = stream_width * length
-            height = stream_height * length
-            if width > 65535 or length > 65535:
-                while width > 65535 or length > 65535:
-                    Checker.is_end()
-                    width //= 2
-                    length //= 2
-                arg_scale = f',scale={width}x{height}'
-            else:
-                arg_scale = ''
-            tiles = length**2
-            time_delta = duration / tiles
-            if duration < datetime.timedelta(seconds=tiles*5):
-                args = (
-                    *args_hwaccel, '-i', file_raw, '-map', f'0:{stream_id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta.total_seconds()}),tile={length}x{length}{arg_scale}', *args_out
-                )
-            else:
-                time_start = time_zero
-                args_input = []
-                args_position = []
-                args_mapper = []
-                file_id = 0
-                for i in range(length):
-                    for j in range(length):
-                        Checker.is_end()
-                        args_input.extend(('-ss', str(time_start), '-i', file_raw))
-                        args_mapper.append(f'[{file_id}:{stream_id}]')
-                        args_position.append(f'{j*stream_width}_{i*stream_height}')
-                        time_start += time_delta
-                        file_id += 1
-                arg_mapper = ''.join(args_mapper)
-                arg_position = '|'.join(args_position)
-                args = (
-                    *args_hwaccel, *args_input, '-filter_complex', f'{arg_mapper}xstack=inputs={tiles}:layout={arg_position}{arg_scale}', *args_out
-                )
-            prompt = f'Taking screenshot, {length}x{length} grid, for each {time_delta} segment, {width}x{height} res'
-        while True:
-            Pool.wait(log, 'ss')
-            log.info(prompt)
-            if Ffmpeg(args, null=True).poll_dumb():
-                log.warning('Failed to screenshoot, retring that later')
-            else:
-                break
-            Checker.sleep(5)
-    except EndExecution:
-        log.debug(f'Ending thread {threading.current_thread()}')
-        return
-    log.info('Screenshot taken')
-    shutil.move(file_cache, file_out)
-
 
 def cleaner(
     dir_work_sub: pathlib.Path,
@@ -1101,7 +1265,7 @@ def cleaner(
     log = LoggingWrapper(f'[{file_raw.name}]')
     try:
         for thread in threads:
-            join(thread)
+            Checker.join(thread)
         log.info(f'Cleaning input and {dir_work_sub}...')
         shutil.rmtree(dir_work_sub)
         file_raw.unlink()
@@ -1121,6 +1285,22 @@ class Checker:
         if Checker.end_flag:
             if p is not None:
                 p.kill()
+            raise EndExecution
+
+    @staticmethod
+    def join(thread: threading.Thread):
+        """Cleanly join a thread, just an invoker so that the work_end flag can be captured
+
+        used in muxer (scope: child/muxer)
+        used in cleaner (scope: child/cleaner)
+
+        scope: child
+            The EndExecution flag could be raised by check_end, we pass it as is
+        """
+        if Checker.end_flag:
+            raise EndExecution
+        thread.join()
+        if Checker.end_flag:
             raise EndExecution
 
     @staticmethod
@@ -1337,6 +1517,7 @@ class Pool:
                     return True
             return False
 
+
     @staticmethod
     def scheduler():
         Pool.log.info('Started')
@@ -1435,6 +1616,7 @@ if __name__ == '__main__':
                                 dir_work,
                                 i.stem + str(suffix)
                             )
+                    
                     if not dir_work_sub.exists():
                         dir_work_sub.mkdir()
                     dirs_work_sub.append(dir_work_sub)
@@ -1445,44 +1627,7 @@ if __name__ == '__main__':
                     name = f'{i.stem}.mkv'
                     file_archive = dir_archive / name
                     file_preview = dir_preview / name
-                    work_archive = not file_archive.exists()
-                    work_preview = not file_preview.exists()
-                    for stream_id, stream in enumerate(j):
-                        if stream.type is None:
-                            if work_archive:
-                                streams_archive.append(None)
-                            if work_preview:
-                                streams_preview.append(None)
-                        else:
-                            if stream['type'] == 'video':
-                                videos[stream_id] = stream
-                            if work_archive:
-                                streams_archive, threads_archive = thread_adder(dir_work_sub, i, 'archive', stream_id, stream['type'], stream['duration'], stream['size'], stream['lossless'], 0, 0, streams_archive, threads_archive)
-                            if work_preview:
-                                if stream['type'] == 'video':
-                                    streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', stream_id, 'video', stream['duration'], stream['size'], stream['lossless'], stream['width'], stream['height'], streams_preview, threads_preview)
-                                else:
-                                    audios.append(stream_id)
-                                    audios_size += stream['size']
-                                    audios_duration = max(stream['duration'], audios_duration)
                     threads_screenshot=[]
-                    if len(videos) == 1:
-                        file_screenshot = dir_screenshot / f'{i.stem}.jpg'
-                        stream_id, stream = next(iter(videos.items()))
-                        if not file_screenshot.exists():
-                            threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot.jpg', file_screenshot, stream_id, stream['duration'], stream['width'], stream['height'], stream['rotation'])))
-                            log_main.debug(f'Spawned thread {threads_screenshot[-1]}')
-                            threads_screenshot[-1].start()
-                    else:
-                        dir_screenshot_sub = dir_screenshot / i.stem
-                        if not dir_screenshot_sub.exists():
-                            dir_screenshot_sub.mkdir()
-                        for i_r, j_r in videos.items():
-                            file_screenshot = dir_screenshot_sub / f'{i.stem}_{i_r}.jpg'
-                            if not file_screenshot.exists():
-                                threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot_{i_r}.jpg', file_screenshot, i_r, j_r['duration'], j_r['width'], j_r['height'], j_r['rotation'])))
-                                log_main.debug(f'Spawned thread {threads_screenshot[-1]}')
-                                threads_screenshot[-1].start()
                     threads_muxer = []
                     if work_archive:
                         threads_muxer.append(threading.Thread(target=muxer, args=(
