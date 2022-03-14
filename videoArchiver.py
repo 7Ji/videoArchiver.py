@@ -1,7 +1,3 @@
-if __name__ != '__main__':
-    raise RuntimeError('REFUSED to be imported, you should only run this as sciprt! (i.e. python videoArchiver.py, or python -m videoArchiver) Most functions are heavily dependent on global variables only set in the main body to reduce memory usage. If you really want to test this as a module, you could capture this RuntimeError, but videoArchiver.py is not guaranteed to not fuck up your computer')
-    
-
 import datetime
 import threading
 import subprocess
@@ -9,6 +5,7 @@ import json
 import re
 import pathlib
 import shutil
+from numpy import isin
 import psutil
 import time
 import pickle
@@ -36,8 +33,9 @@ class CleanPrinter:
     def check_terminal(cls):
         width = shutil.get_terminal_size()[0]
         if width == cls.width:
-            return 
+            return False
         cls.width = width
+        return True
 
     @classmethod
     def clear_line(cls):
@@ -188,16 +186,23 @@ class Duration:
         Duration.__complain_comparasion('multiply', other)
 
     def __truediv__(self, other: int | float):
-        if isinstance(other, int | float):
+        if isinstance(other, Duration):
+            return self.time / other.time
+        elif isinstance(other, int | float):
             return Duration(self.time / other)
         Duration.__complain_comparasion('divide', other)
 
     def __floordiv__(self, other: int | float):
-        if isinstance(other, int | float):
+        if isinstance(other, Duration):
+            return self.time // other.time
+        elif isinstance(other, int | float):
             return Duration(self.time // other)
         Duration.__complain_comparasion('divide', other)
 
     def __divmod__(self, other: int | float):
+        if isinstance(other, Duration):
+            percent, remainder = divmod(self.time, other.time)
+            return percent, Duration(remainder)
         if isinstance(other, int | float):
             time, remainder = divmod(self.time, other)
             return Duration(time), Duration(remainder)
@@ -312,7 +317,7 @@ class Duration:
         Duration.__complain_comparasion('compare', other)
 
 
-class ProgressBar(CleanPrinter):
+class ProgressBar:
     """Progress bar with title, percent, spent/estimate time
     """
     def __init__(self, log: LoggingWrapper = '[Title]'):
@@ -325,40 +330,41 @@ class ProgressBar(CleanPrinter):
         self.percent_str = '  0%'
         self.bar_complete = -1
         self.bar_complete_str = ''
-        self.time_start = datetime.datetime.today()
+        self.time_start = time.time()
         self.time_spent = Duration(0)
         self.time_estimate = None
+        self.time_encoded_str = ' E:00:00:00'
         self.time_spent_str = ' S:00:00:00'
-        self.time_estimate_str = ' R:--:--:--'
+        self.time_remaining_str = ' R:--:--:--'
         self.display(True)
 
 
     def display(self, update=False):
         if self.percent == 1:
-            CleanPrinter.clear_line()
             with CleanPrinter.lock_bar:
                 CleanPrinter.bars -= 1
+            CleanPrinter.clear_line()
             self.log.debug('Encoder exited')
         else:
-            width = shutil.get_terminal_size()[0]
-            width_update = width != CleanPrinter.width
-            if update or width_update:
-                if width_update:
-                    CleanPrinter.width = width 
+            update = CleanPrinter.check_terminal() or update
+            if update:
                 self.display_bar = False
                 self.display_percent = False
+                self.display_remaining = False
+                self.display_encoded = False
                 self.display_spent = False
-                self.display_estimate = False
-                length = width - self.title_length - 1  # 1 for bar
-                if length > 0:
+                length = CleanPrinter.width - self.title_length  # 1 for bar
+                if length > 1:
                     self.display_bar = True
-                    if length > 4:
+                    if length > 5:
                         self.display_percent = True
-                        if length > 15:  # 12 for time_spent_str
-                            self.display_spent = True
-                            if length > 26:  # 12 for time_estimate_str
-                                self.display_estimate = True
-                    self.bar_length = CleanPrinter.width - self.title_length - 4 * self.display_percent - 11 * self.display_spent - 11 * self.display_estimate
+                        if length > 16:  # 12 for time_spent_str
+                            self.display_remaining = True
+                            if length > 27:  # 12 for time_estimate_str
+                                self.display_encoded = True
+                                if length > 38:
+                                    self.display_spent = True
+                    self.bar_length = CleanPrinter.width - self.title_length - 4 * self.display_percent - 11 * self.display_remaining - 11 * self.display_encoded - 11 * self.display_spent
             if not self.display_bar:
                 return
             bar_complete = int(self.percent * self.bar_length)
@@ -370,12 +376,13 @@ class ProgressBar(CleanPrinter):
                 if not update:
                     update = True
             line = [self.log.title, self.bar_complete_str, self.bar_incomplete_str]
-            if self.display_spent:
-                time_spent = datetime.datetime.today() - self.time_start
-                if time_spent - self.time_spent > time_second:
+            if self.display_remaining:
+                time_spent = time.time() - self.time_start
+                if time_spent - self.time_spent > 1:
                     self.time_spent = time_spent
-                    self.time_spent_str = ' S:' + str_from_time(time_spent)
-                    if self.display_estimate and self.percent != 0:
+                    self.time_spent_str = ' S:' + Duration(time_spent).hms()
+                    if self.display_encoded:
+                        
                         self.time_estimate = time_spent / self.percent - time_spent
                         self.time_estimate_str = ' R:' + str_from_time(self.time_estimate)
                     if not update:
@@ -449,7 +456,7 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
     args_video_archive = '-c:v', 'libx264', '-crf', '23', '-preset', 'veryslow'
     args_video_preview = '-c:v', 'libsvtav1', '-qp', '63', '-preset', '8'
     args_audio_archive = '-c:a', 'libopus', '-b:a', '128000'
-    args_audio_preview = '-c:a', 'libopus', '-b:a', '24000'
+    args_audio_preview = '-c:a', 'libopus', '-b:a', '10000'
 
     @staticmethod
     def _log_cutter(log:list):
