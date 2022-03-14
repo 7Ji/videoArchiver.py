@@ -437,10 +437,10 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
     }
     reg_running = re.compile(r'size= *(\d+)kB')
     reg_time = re.compile(r' time=([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{2}) ')
-    args_video_archive = ('-c:v', 'libx264', '-crf', '23', '-preset', 'veryslow')
-    args_video_preview = ('-c:v', 'libsvtav1', '-qp', '63', '-preset', '8')
-    args_audio_archive = ('-c:a', 'libfdk_aac', '-vbr', '5')
-    args_audio_preview = ('-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a')
+    args_video_archive = ('-c:v', 'libx264', '-crf', '23', '-preset', 'veryslow', '-an')
+    args_video_preview = ('-c:v', 'libsvtav1', '-qp', '63', '-preset', '8', '-an')
+    args_audio_archive = ('-c:a', 'libfdk_aac', '-vbr', '5', '-vn')
+    args_audio_preview = ('-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-vn')
 
     @staticmethod
     def __log_cutter(log):
@@ -609,23 +609,19 @@ class Video:
                 self.videos = []
                 video = False
                 for stream_id, stream in enumerate(
-                    json.loads(Ffprobe(('-show_self.streams', '-of', 'json', i)).stdout)['self.streams']
+                    json.loads(Ffprobe(('-show_self.streams', '-of', 'json', path)).stdout)['self.streams']
                 ):
                     #log_scanner.info(f'Getting stream information for stream {stream_id} from {i}')
                     stream_type = stream['codec_type'] 
                     if stream_type in ('video', 'audio'):
                         stream_duration, stream_size = Stream.get_duration_and_size(path, stream_id, stream_type)
                         stream = Stream(stream_id, stream_type, stream_duration, stream_size, stream)
+                        self.streams.append(stream)
                         if stream_type == 'video':
                             self.videos.append(stream)
-                        else:
-                            self.audios.append(stream)
-                        self.streams.append(stream)
                     else:
                         self.streams.append(None)
-                    if not video and stream_type == 'video':
-                        video = True
-                if video:
+                if self.videos:
                     self.__len = len(self.streams)
                     return
         raise NotVideo
@@ -647,15 +643,21 @@ class Video:
             raise KeyError(f'{key} is not a valid stream id')
         return self.streams[key]
 
-    def prepare(self, dir_work_sub:pathlib.Path):
+    @staticmethod
+    def __should_work(file_out:pathlib.Path, file_done:pathlib.Path):
+        if file_done.exists():
+            if file_out.exists():
+                return False
+            else:
+                file_done.unlink()
+        return True
+
+    def start(self, dir_work_sub:pathlib.Path):
         self.work = dir_work_sub
         self.archive = dir_archive / f'{self.name}.mkv'  # It's determined here so the output path can be updated before encoding
         self.preview = dir_preview / f'{self.name}.mkv'
-        self.threads_archive, self.threads_preview, self.threads_muxer, streams_archive, streams_preview, audios =  ([] for i in range(6))
-        videos = {}
+        threads_archive, threads_preview, threads_muxer, threads_screenshot, streams_archive, streams_preview = ([] for i in range(6))
         amix = len(self.audios) > 1
-        audios_size = 0
-        audios_duration = Duration()
         work_archive = not self.archive.exists()
         work_preview = not self.preview.exists()
         for stream in self.streams:
@@ -666,59 +668,75 @@ class Video:
                     streams_preview.append(None)
             else:
                 if work_archive:
-                    threads_archive.append(threading.Thread(target=stream.encode, args=('archive')))
-                    threads_archive[-1].start()
-                if work_preview and not amix:
-                    threads_preview.append(threading.Thread(target=stream.encode, args=('preview')))
-                    threads_preview[-1].start()
+                    file_out = self.work / f'{self.name}_archive_{stream.id}_{stream.type}.nut'
+                    file_done = self.work / f'{self.name}_archive_{stream.id}_{stream.type}.done'
+                    if Video.__should_work(file_out, file_done):
+                        threads_archive.append(threading.Thread(target=stream.encode, args=('archive', file_out, file_done)))
+                        threads_archive[-1].start()
+                        streams_archive.append(file_out)
+                    else:
+                        streams_archive.append(None)
+                if not amix and work_preview:
+                    file_out = self.work / f'{self.name}_preview_{stream.id}_{stream.type}.nut'
+                    file_done = self.work / f'{self.name}_preview_{stream.id}_{stream.type}.done'
+                    if Video.__should_work(file_out, file_done):
+                        threads_preview.append(threading.Thread(target=stream.encode, args=('preview', file_out, file_done)))
+                        threads_preview[-1].start()
+                        streams_preview.append(file_out)
+                    else:
+                        streams_preview.append(None)
         if amix:
-            threads_preview.append(threading.Thread(target=self.audios[0].encode, args=('preview', True)))
-            self.amix()
+            file_out = self.work / f'{self.name}_preview_amix.nut'
+            file_done = self.work / f'{self.name}_preview_amix.done'
+            if Video.__should_work(file_out, file_done):
+                threads_preview.append(threading.Thread(target=self.audios[0].encode, args=('preview', file_out, file_done, True)))
+        if work_archive:
+            threads_muxer.append(threading.Thread(target=muxer, args=(
+                i, dir_work_sub / f'{i.stem}_archive.mkv', file_archive,
+                streams_archive, threads_archive
+            )))
+            log_main.debug(f'Spawned thread {threads_muxer[-1]}')
+            threads_muxer[-1].start()
+        if work_preview:
+            if audios:
+                streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', len(audios), 'audio', audios_duration, audios_size, True, 0, 0, streams_preview, threads_preview, True)
+            threads_muxer.append(threading.Thread(target=muxer, args=(
+                i, dir_work_sub / f'{i.stem}_preview.mkv', file_preview,
+                streams_preview, threads_preview
+            )))
+            log_main.debug(f'Spawned thread {threads_muxer[-1]}')
+            threads_muxer[-1].start()
+
+        
         if len(self.videos) == 1:
-            file_screenshot = dir_screenshot / f'{i.stem}.jpg'
+            file_screenshot = dir_screenshot / f'{self.name}.jpg'
             if not file_screenshot.exists():
-                threads_screenshot.append(threading.Thread(target=screenshot, args=(i, dir_work_sub / f'{i.stem}_screenshot.jpg', file_screenshot, stream_id, stream['duration'], stream['width'], stream['height'], stream['rotation'])))
+                threads_screenshot.append(threading.Thread(target=self.videos[0].screenshot))
                 log_main.debug(f'Spawned thread {threads_screenshot[-1]}')
-                threads_screenshot[-1].start()
+                threads_screenshot[0].start()
         else:
-            dir_screenshot_sub = dir_screenshot / i.stem
+            dir_screenshot_sub = dir_screenshot / self.name
             if not dir_screenshot_sub.exists():
                 dir_screenshot_sub.mkdir()
-            for i_r, j_r in videos.items():
-                file_screenshot = dir_screenshot_sub / f'{i.stem}_{i_r}.jpg'
+            for stream in self.videos:
+                file_screenshot = dir_screenshot_sub / f'{self.name}_{stream.id}.jpg'
                 if not file_screenshot.exists():
-                    threads_screenshot.append(threading.Thread(target=screenshooter, args=(i, dir_work_sub / f'{i.stem}_screenshot_{i_r}.jpg', file_screenshot, i_r, j_r['duration'], j_r['width'], j_r['height'], j_r['rotation'])))
+                    threads_screenshot.append(threading.Thread(target=stream.screenshot, args=(dir_screenshot_sub, )))
                     log_main.debug(f'Spawned thread {threads_screenshot[-1]}')
                     threads_screenshot[-1].start()
+        
+        thread_cleaner = threading.Thread(target=cleaner, args=(dir_work_sub, i, threads_screenshot + threads_muxer))
+        log_main.debug(f'Spawned thread {thread_cleaner}')
+        thread_cleaner.start()
+        Pool.Work.add(i)
 
-    def amix(self, audios):
-        pass
-
-    def muxer(
-        file_raw: pathlib.Path,
-        file_cache: pathlib.Path,
-        file_out: pathlib.Path,
-        streams: list,
-        threads: list = None,
+    def muxer(self, encode_type:str, file_cache: pathlib.Path, file_out: pathlib.Path, streams: list, threads: list = None,
     ):
-        """Muxing finished video/audio streams and non va streams from raw file to a new mkv container
-
-        muxer itself (scopte: child/muxer)
-
-        scope: child-main
-            As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
-                join
-                check_end
-                ffmpeg_dumb_poller
-
-            Should that, return to end this thread
-        """
-        log = LoggingWrapper(f'[{file_raw.name}]')
+        log = LoggingWrapper(f'[{self.name}] M:{encode_type}')
         try:
-            if threads is not None and threads:
-                for thread in threads:
-                    Checker.join(thread)
-            inputs = ['-i', file_raw]
+            for thread in threads:
+                Checker.join(thread)
+            inputs = ['-i', self.raw]
             input_id = 0
             mappers = []
             for stream_id, stream in enumerate(streams):
@@ -777,11 +795,6 @@ class Video:
 
 
 class Stream:
-    # VIDEO = 0
-    # AUDIO = 1
-    # SUBTITLE = 2
-    # DATA = 3
-    # ATTACHMENT = 4
     lossless = {
         'video': ('012v', '8bps', 'aasc', 'alias_pix', 'apng', 'avrp', 'avui', 'ayuv', 'bitpacked', 'bmp', 'bmv_video', 'brender_pix', 'cdtoons', 'cllc', 'cscd', 'dpx', 'dxa', 'dxtory', 'ffv1', 'ffvhuff', 'fits', 'flashsv', 'flic', 'fmvc', 'fraps', 'frwu', 'gif', 'huffyuv', 'hymt', 'lagarith', 'ljpeg', 'loco', 'm101', 'magicyuv', 'mscc', 'msp2', 'msrle', 'mszh', 'mwsc', 'pam', 'pbm', 'pcx', 'pfm', 'pgm', 'pgmyuv', 'pgx', 'png', 'ppm', 'psd', 'qdraw', 'qtrle', 'r10k', 'r210', 'rawvideo', 'rscc', 'screenpresso', 'sgi', 'sgirle', 'sheervideo', 'srgc', 'sunrast', 'svg', 'targa', 'targa_y216', 'tiff', 'tscc', 'utvideo', 'v210', 'v210x', 'v308', 'v408', 'v410', 'vble', 'vmnc', 'wcmv', 'wrapped_avframe', 'xbm', 'xpm', 'xwd', 'y41p', 'ylc', 'yuv4', 'zerocodec', 'zlib', 'zmbv'),
         'audio': ('alac', 'ape', 'atrac3al', 'atrac3pal', 'dst', 'flac', 'mlp', 'mp4als', 'pcm_bluray', 'pcm_dvd', 'pcm_f16le', 'pcm_f24le', 'pcm_f32be', 'pcm_f32le', 'pcm_f64be', 'pcm_f64le', 'pcm_lxf', 'pcm_s16be', 'pcm_s16be_planar', 'pcm_s16le', 'pcm_s16le_planar', 'pcm_s24be', 'pcm_s24daud', 'pcm_s24le', 'pcm_s24le_planar', 'pcm_s32be', 'pcm_s32le', 'pcm_s32le_planar', 'pcm_s64be', 'pcm_s64le', 'pcm_s8', 'pcm_s8_planar', 'pcm_sga', 'pcm_u16be', 'pcm_u16le', 'pcm_u24be', 'pcm_u24le', 'pcm_u32be', 'pcm_u32le', 'pcm_u8', 'ralf', 's302m', 'shorten', 'tak', 'truehd', 'tta', 'wmalossless')
@@ -831,148 +844,36 @@ class Stream:
             else:
                 self.rotation = None
 
-    def __sum_parts(self):
-        self.__log.warning(f'Finding all failed parts of {self.__file_out}')
-        suffix = 0
-        file_check = self.parent.work / f'{self.__prefix}_{suffix}.nut'
-        while file_check.exists():
-            Checker.is_end()
-            self.__log.warning(f'Found a failed part: {file_check}')
-            size_delta = file_check.stat().st_size
-            if size_delta:
-                time_delta = Stream.get_duration(file_check)
-                if time_delta:
-                    self.__start += time_delta
-                    self.__size_exist += size_delta
-                    self.__log.warning(f'Recovered: {file_check}, Duration: {time_delta}, size: {size_delta}. Total: Duration:{self.__start}, size: {self.__size_exist}')
-                    self.__concat_list.append(file_check.name)
-                else:
-                    self.__log.warning(f'Unable to recovery: {file_check}, skipped')
-            suffix += 1
-            file_check = self.parent.work / f'{self.__prefix}_{suffix}.nut'
-        self.__log.info(f'Recovered last part will be saved to {file_check}')
-        return file_check
-
-    def __extract_frames(self):
-        file_work = self.__sum_parts()
-        file_recovery = self.parent.work / f'{self.__prefix}_recovery.nut'
-        for _ in range(3):
-            Checker.is_end()
-            if self.type == 'video':
-                self.__log.info('Checking if the interrupt file is usable')
-                p = Ffprobe(('-show_frames', '-select_streams', 'v:0', '-of', 'json', self.__file_out))
-                if p.returncode == 0:
-                    self.__log.info('Analyzing available frames')
-                    frames = json.loads(p.stdout)['frames']
-                    self.__log.debug(f'{len(frames)} frames found in {self.__file_out}')
-                    frame_last = 0
-                    for frame_id, frame in enumerate(reversed(frames)):
-                        Checker.is_end()
-                        if frame['key_frame']:
-                            frame_last = len(frames) - frame_id - 1
-                            break
-                    self.__log.debug(f'Last GOP start at frame: {frame_last}')
-                    if frame_last:
-                        self.__log.info(f'Recovering {frame_last} usable video frames')
-                        p = Ffmpeg(('-i', self.__file_out, '-c', 'copy', '-map', '0', '-y', '-vframes', str(frame_last), file_recovery))
-                    else:
-                        self.__log.info('No frames usable')
-                        break
-            else:
-                self.__log.info('Recovering usable audio frames')
-                p = Ffmpeg(('-i', self.__file_out, '-c', 'copy', '-map', '0', '-y', file_recovery))
-            if isinstance(p, Ffmpeg):
-                r, t = p.poll_time(self.type)
-                if r:
-                    self.__log.warning('Recovery failed, retrying that later')
-                else:
-                    self.__start += t
-                    self.__size_exist += file_recovery.stat().st_size
-                    shutil.move(file_recovery, file_work)
-                    self.__concat_list.append(file_work.name)
-                    self.__log.info(f'{t} of failed transcode recovered. Total: duration:{self.__start}, size{self.__size_exist}')
-                    break
-
-    def __recovery(self):
-        if self.__file_out.exists():
-            self.__size_exist = self.__file_out.stat().st_size
-            if self.__size_exist:
-                self.__log.warning('Output already exists, potentially broken before, trying to recover it')
-                time_delta = Stream.get_duration(self.__file_out)
-                if time_delta:
-                    self.__log.debug(f'Recovery needed: {self.__file_out}')
-                    if abs(self.duration - time_delta) < 1:
-                        self.__log.info('Last transcode successful, no need to transcode')
-                        self.__file_done.touch()
-                        return
-                    self.__extract_frames()
-                    self.__file_out.unlink()
-                    with Checker.context(open(self.__file_concat_pickle, 'wb')) as f:
-                        pickle.dump((self.__concat_list, self.__start, self.__size_exist), f)
-            self.__file_out.unlink()      
-        # Check if recovered last time
-        if not self.__concat_list and self.__file_concat_pickle.exists():
-            with self.__file_concat_pickle.open('rb') as f:
-                self.__concat_list, self.__start, self.__size_exist = pickle.load(f)
-
-    def __copy(self):
-        self.__log.info('Transcode inefficient, copying raw stream instead')
-        file_copy = self.parent.work / f'{self.__prefix}_copy.nut'
+    def __copy(self, log:LoggingWrapper, prefix:str, file_out:pathlib.Path, file_done:pathlib.Path):
+        log.info('Transcode inefficient, copying raw stream instead')
+        file_copy = self.parent.work / f'{prefix}_copy.nut'
         args = ('-i', self.parent.path, '-c', 'copy', '-map', f'0:{self.id}', '-y', file_copy)
         while Ffmpeg(args, null=True).poll_dumb():
             Checker.is_end()
-            self.__log.warning('Stream copy failed, trying that later')
+            log.warning('Stream copy failed, trying that later')
             Checker.sleep(5)
-        shutil.move(file_copy, self.__file_out)
-        self.__log.info('Stream copy done')
-        self.__file_done.touch()
+        shutil.move(file_copy, file_out)
+        log.info('Stream copy done')
+        file_done.touch()
 
-    def __concat(self):
-        self.__log.info('Transcode done, concating all parts')
-        file_list = self.parent.work / f'{self.__prefix}.list'
-        file_concat = self.parent.work / f'{self.__prefix}_concat.nut'
+    def __concat(self, log:LoggingWrapper, prefix:str, concat_list:list, file_out:pathlib.Path, file_done:pathlib.Path):
+        log.info('Transcode done, concating all parts')
+        file_list = self.parent.work / f'{prefix}.list'
+        file_concat = self.parent.work / f'{prefix}_concat.nut'
         with Checker.context(open(file_list, 'w')) as f:
-            for file in self.__concat_list:
+            for file in concat_list:
                 Checker.is_end()
                 f.write(f'file {file}\n')
         args = ('-f', 'concat', '-safe', '0', '-i', file_list, '-c', 'copy', '-map', '0', '-y', file_concat)
         while Ffmpeg(args, null=True).poll_dumb():
             Checker.is_end()
-            self.__log.warning('Concating failed, trying that later')
+            log.warning('Concating failed, trying that later')
             Checker.sleep(5)
-        shutil.move(file_concat, self.__file_out)
-        self.__log.info('Concating done')
-        self.__file_done.touch()
+        shutil.move(file_concat, file_out)
+        log.info('Concating done')
+        file_done.touch()
 
-    def __args_constructor(self):
-        args_in = ('-ss', str(self.__start), '-i', self.parent.raw)
-        if self.type != 'audio' and encode_type != 'preview':
-            args_map = ('-map', f'0:{self.id}')
-        args_out = ('-y', self.__file_out)
-        if self.type == 'video':
-            if encode_type == 'archive':
-                args = (*args_in,  *Ffmpeg.args_video_archive, *args_map, *args_out)
-            else:
-                if self.width > 1000 and self.height > 1000:
-                    stream_width = self.width
-                    stream_height = self.height
-                    while stream_width > 1000 and stream_height > 1000:
-                        stream_width //= 2
-                        stream_height //= 2
-                    args=(*args_in, *Ffmpeg.args_video_preview, *args_map, '-filter:v', f'scale={stream_width}x{stream_height}', *args_out)
-                else:
-                    args=(*args_in, *Ffmpeg.args_video_preview, *args_map, *args_out)
-        else: # Audio
-            if encode_type == 'archive':
-                args=(*args_in, *Ffmpeg.args_audio_archive, *args_map, *args_out)
-            else:
-                if self.id == 1:
-                    args=(*args_in, *Ffmpeg.args_audio_preview, *args_out)
-                else:
-                    args=(*args_in, *Ffmpeg.args_audio_preview, '-filter_complex', f'amix=inputs={len(self.parent)}:duration=longest', *args_out)
-        self.__args = args
-
-    def encode(self, encode_type:str, amix:bool=False):
+    def encode(self, encode_type:str, file_out:pathlib.Path, file_done:pathlib.Path, amix:bool=False):
         """Encoding certain stream in a media file
 
         encoder itself (scope: child/encoder)
@@ -989,65 +890,157 @@ class Stream:
 
             Should that, return to end this thread
         """
-        self.__file_out = self.parent.work / f'{self.parent.name}_{encode_type}_{self.id}_{self.type}.nut'
-        self.__file_done = self.parent.work / f'{self.parent.name}_{encode_type}_{self.id}_{self.type}.done'
         if amix:
-            self.__log = LoggingWrapper(f'[{self.parent.name}] E:P S:Amix')
-            self.__prefix = f'{self.parent.name}_preview_audio'
+            log = LoggingWrapper(f'[{self.parent.name}] E:P S:Amix')
+            prefix = f'{self.parent.name}_preview_audio'
         else:
-            self.__log = LoggingWrapper(f'[{self.parent.name}] E:{encode_type[:1].capitalize()} S:{self.id}:{self.type[:1].capitalize()}')
-            self.__prefix = f'{self.parent.name}_{encode_type}_{self.id}_{self.type}'
-        self.__log.info('Work started')
-        self.__file_concat_pickle = self.parent.work / f'{self.__prefix}_concat.pkl'
+            log = LoggingWrapper(f'[{self.parent.name}] E:{encode_type[:1].capitalize()} S:{self.id}:{self.type[:1].capitalize()}')
+            prefix = f'{self.parent.name}_{encode_type}_{self.id}_{self.type}'
+        log.info('Work started')
         check_efficiency = encode_type == 'archive'  and not self.lossless 
-        self.__start = Duration()
-        self.__size_exist = 0
-        self.__concat_list = []
+        concat_list = []
+        start = Duration()
+        size_exist = 0
+        file_concat_pickle = self.parent.work / f'{self.__prefix}_concat.pkl'
         try:
             # Recovery
-            self.__recovery()
+            if file_out.exists():
+                size_exist = file_out.stat().st_size
+                if size_exist:
+                    log.warning('Output already exists, potentially broken before, trying to recover it')
+                    time_delta = Stream.get_duration(file_out)
+                    if time_delta:
+                        log.debug(f'Recovery needed: {file_out}')
+                        if abs(self.duration - time_delta) < 1:
+                            log.info('Last transcode successful, no need to transcode')
+                            file_done.touch()
+                            return
+                        log.warning(f'Finding all failed parts of {file_out}')
+                        suffix = 0
+                        file_check = self.parent.work / f'{prefix}_{suffix}.nut'
+                        while file_check.exists():
+                            Checker.is_end()
+                            log.warning(f'Found a failed part: {file_check}')
+                            size_delta = file_check.stat().st_size
+                            if size_delta:
+                                time_delta = Stream.get_duration(file_check)
+                                if time_delta:
+                                    start += time_delta
+                                    size_exist += size_delta
+                                    log.warning(f'Recovered: {file_check}, Duration: {time_delta}, size: {size_delta}. Total: Duration:{start}, size: {size_exist}')
+                                    concat_list.append(file_check.name)
+                                else:
+                                    log.warning(f'Unable to recovery: {file_check}, skipped')
+                            suffix += 1
+                            file_check = self.parent.work / f'{prefix}_{suffix}.nut'
+                        log.info(f'Recovered last part will be saved to {file_check}')
+                        file_recovery = self.parent.work / f'{prefix}_recovery.nut'
+                        for _ in range(3):
+                            Checker.is_end()
+                            if self.type == 'video':
+                                log.info('Checking if the interrupt file is usable')
+                                p = Ffprobe(('-show_frames', '-select_streams', 'v:0', '-of', 'json', file_out))
+                                if p.returncode == 0:
+                                    log.info('Analyzing available frames')
+                                    frames = json.loads(p.stdout)['frames']
+                                    log.debug(f'{len(frames)} frames found in {file_out}')
+                                    frame_last = 0
+                                    for frame_id, frame in enumerate(reversed(frames)):
+                                        Checker.is_end()
+                                        if frame['key_frame']:
+                                            frame_last = len(frames) - frame_id - 1
+                                            break
+                                    log.debug(f'Last GOP start at frame: {frame_last}')
+                                    if frame_last:
+                                        log.info(f'Recovering {frame_last} usable video frames')
+                                        p = Ffmpeg(('-i', file_out, '-c', 'copy', '-map', '0', '-y', '-vframes', str(frame_last), file_recovery))
+                                    else:
+                                        log.info('No frames usable')
+                                        break
+                            else:
+                                log.info('Recovering usable audio frames')
+                                p = Ffmpeg(('-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery))
+                            if isinstance(p, Ffmpeg):
+                                r, t = p.poll_time(self.type)
+                                if r:
+                                    log.warning('Recovery failed, retrying that later')
+                                else:
+                                    start += t
+                                    size_exist += file_recovery.stat().st_size
+                                    shutil.move(file_recovery, file_check)
+                                    concat_list.append(file_check.name)
+                                    log.info(f'{t} of failed transcode recovered. Total: duration:{start}, size{size_exist}')
+                                    break
+                        file_out.unlink()
+                        with Checker.context(open(file_concat_pickle, 'wb')) as f:
+                            pickle.dump((concat_list, start, size_exist), f)
+                file_out.unlink()      
+            # Check if recovered last time
+            if not concat_list and file_concat_pickle.exists():
+                with file_concat_pickle.open('rb') as f:
+                    concat_list, start, size_exist = pickle.load(f)
             # If recovered, check if there is the need to continue recovery
-            if self.__concat_list:
+            if concat_list:
                 # We've already transcoded this
-                if check_efficiency and self.__size_exist > self.size * 0.9:
-                    self.__copy()
+                if check_efficiency and size_exist > self.size * 0.9:
+                    self.__copy(log, prefix, file_out, file_done)
                     return 
-                if self.__start >= self.duration or self.duration - self.__start < Duration(1):
-                    self.__concat()
+                if start >= self.duration or self.duration - start < 1:
+                    self.__concat(log, prefix, concat_list, file_out, file_done)
                     return
             # Real encoding happenes below
-            
             if check_efficiency:
-                size_allow = self.size * 0.9 - self.__size_exist
-            self.__args_constructor()
+                size_allow = self.size * 0.9 - size_exist
+            arg_map = f'0:{self.id}'
+            args_filter = ()
+            if self.type == 'video':
+                if encode_type == 'archive':
+                    args_codec = Ffmpeg.args_video_archive
+                else:
+                    args_codec = Ffmpeg.args_video_preview
+                    if self.width > 1000 and self.height > 1000:
+                        stream_width = self.width
+                        stream_height = self.height
+                        while stream_width > 1000 and stream_height > 1000:
+                            stream_width //= 2
+                            stream_height //= 2
+                        args_filter = '-filter:v', f'scale={stream_width}x{stream_height}'
+            else: # Audio
+                if encode_type == 'archive':
+                    args_codec = Ffmpeg.args_audio_archive
+                else:
+                    arg_map = '0:a'
+                    args_codec = Ffmpeg.args_audio_preview
+                    args_filter = '-filter_complex', f'amix=inputs={len(self.parent)}:duration=longest'
+            args = '-ss', str(start), '-i', self.parent.raw, *args_codec, *args_filter, arg_map, '-y', file_out
             while True:
-                self.__log.info('Transcode started')
+                log.info('Transcode started')
                 Checker.is_end()
                 if self.type == 'video':
-                    Pool.wait(self.__log, encode_type)
-                p = Ffmpeg(self.__args)
+                    Pool.wait(log, encode_type)
+                p = Ffmpeg(args)
                 if check_efficiency:
-                    r, inefficient = p.poll_size(self.type, size_allow, self.__file_out)
+                    r, inefficient = p.poll_size(self.type, size_allow, file_out)
                     if inefficient:
-                        self.__copy()
+                        self.__copy(log, prefix, file_out, file_done)
                         return
                 else:
                     p.poll_dumb()
                 if p.returncode == 0:
-                    if self.__concat_list:
-                        self.__concat_list.append(self.__file_out.name)
-                        self.__concat()
+                    if concat_list:
+                        concat_list.append(file_out.name)
+                        self.__concat(log, prefix, concat_list, file_out, file_done)
                     else:
-                        self.__log.info('Transcode done')
-                        self.__file_done.touch()
+                        log.info('Transcode done')
+                        file_done.touch()
                     break
-                self.__log.warning(f'Transcode failed, returncode: {p.returncode}, retrying that later')
+                log.warning(f'Transcode failed, returncode: {p.returncode}, retrying that later')
                 Checker.sleep(5)
         except EndExecution:
-            self.__log.debug(f'Ending thread {threading.current_thread()}')
+            log.debug(f'Ending thread {threading.current_thread()}')
             return
 
-    def screenshot(self, dir_screenshot_sub: pathlib.Path=None):
+    def screenshot(self, dir_screenshot_sub:pathlib.Path=None):
         """Taking screenshot for video stream, according to its duration, making mosaic screenshot
 
         screenshooter itself (scope: child/screenshooter)
@@ -1330,6 +1323,7 @@ class Database:
         self.lock = threading.Lock()
         self.log = LoggingWrapper('[Database]')
         self.backend = backend
+        self.db = {}
         self.read()
 
     def __iter__(self):
@@ -1353,8 +1347,6 @@ class Database:
                 with open(self.backend, 'rb') as f:
                     Checker.is_end()
                     self.db = pickle.load(f)
-            else:
-                self.db = {}
 
     def write(self):
         """Write the db if it's updated
@@ -1545,37 +1537,6 @@ class Pool:
         Pool.log.debug(f'Ending thread {threading.current_thread()}')
 
 
-
-def thread_adder(dir_work_sub, file_raw, encode_type, stream_id, stream_type, stream_duration, stream_size, stream_lossless, stream_width, stream_height, streams, threads, amix=False):
-    """Add a certainer encoder thread to threads, and start it just then.
-
-    used in main (scope: main)
-    
-    scope: main
-        End when KeyboardException is captured
-    """
-    if amix:
-        file_stream = dir_work_sub / f'{file_raw.stem}_preview_audio.nut'
-        file_stream_done = dir_work_sub / f'{file_raw.stem}_preview_audio.done'
-    else:
-        file_stream = dir_work_sub / f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}.nut'
-        file_stream_done = dir_work_sub / f'{file_raw.stem}_{encode_type}_{stream_id}_{stream_type}.done'
-    streams.append(file_stream)
-    if not file_stream.exists() and file_stream_done.exists():
-        file_stream_done.unlink()
-    if not file_stream_done.exists():
-        threads.append(threading.Thread(target=encoder, args=(
-            dir_work_sub, 
-            i, file_stream, file_stream_done,
-            encode_type,
-            stream_id, stream_type, stream_duration, stream_size, stream_lossless,
-            stream_width, stream_height
-        )))
-        log_main.debug(f'Spawned thread {threads[-1]}')
-        threads[-1].start()
-    return streams, threads
-
-
 # The main function starts here
 if __name__ == '__main__':
     dir_raw = pathlib.Path('raw')
@@ -1588,7 +1549,7 @@ if __name__ == '__main__':
         if not dir.exists():
             dir.mkdir()
     logging.basicConfig(
-        filename=dir_log / f'{datetime.datetime.today().strftime("%Y%m%d_%H%M%S")}.log', 
+        filename=dir_log / f'{time.strftime("%Y%m%d_%H%M%S", time.time())}.log', 
         format='%(asctime)s %(levelname)s: %(message)s',
         level=logging.DEBUG
     )
@@ -1603,52 +1564,18 @@ if __name__ == '__main__':
         while True:
             db.clean()
             scan_dir(dir_raw)
-            for i, j in db.items():
-                if j is not None and not Pool.Work.query(i):
-                    dir_work_sub = pathlib.Path(
-                        dir_work,
-                        i.stem
-                    )
+            for path, video in db.items():
+                if path is not None and not Pool.Work.query(path):
+                    video = Video()
+                    dir_work / video.name
                     if dir_work_sub in dirs_work_sub:
                         suffix = 0
                         while dir_work_sub in dirs_work_sub:
-                            dir_work_sub = pathlib.Path(
-                                dir_work,
-                                i.stem + str(suffix)
-                            )
-                    
+                            dir_work_sub = dir_work / (video.name + str(suffix))
                     if not dir_work_sub.exists():
                         dir_work_sub.mkdir()
-                    dirs_work_sub.append(dir_work_sub)
-                    threads_archive, threads_preview, threads_muxer, streams_archive, streams_preview, audios =  ([] for i in range(6))
-                    videos = {}
-                    audios_size = 0
-                    audios_duration = time_zero
-                    name = f'{i.stem}.mkv'
-                    file_archive = dir_archive / name
-                    file_preview = dir_preview / name
-                    threads_screenshot=[]
-                    threads_muxer = []
-                    if work_archive:
-                        threads_muxer.append(threading.Thread(target=muxer, args=(
-                            i, dir_work_sub / f'{i.stem}_archive.mkv', file_archive,
-                            streams_archive, threads_archive
-                        )))
-                        log_main.debug(f'Spawned thread {threads_muxer[-1]}')
-                        threads_muxer[-1].start()
-                    if work_preview:
-                        if audios:
-                            streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', len(audios), 'audio', audios_duration, audios_size, True, 0, 0, streams_preview, threads_preview, True)
-                        threads_muxer.append(threading.Thread(target=muxer, args=(
-                            i, dir_work_sub / f'{i.stem}_preview.mkv', file_preview,
-                            streams_preview, threads_preview
-                        )))
-                        log_main.debug(f'Spawned thread {threads_muxer[-1]}')
-                        threads_muxer[-1].start()
-                    thread_cleaner = threading.Thread(target=cleaner, args=(dir_work_sub, i, threads_screenshot + threads_muxer))
-                    log_main.debug(f'Spawned thread {thread_cleaner}')
-                    thread_cleaner.start()
-                    Pool.Work.add(i)
+                    video.start(dir_work_sub)
+                    Pool.Work.add(path)
             time.sleep(5)
     except KeyboardInterrupt:
         log_main.warning('Keyboard Interrupt received, exiting safely...')
