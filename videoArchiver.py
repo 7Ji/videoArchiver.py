@@ -136,7 +136,7 @@ class Duration:
         hours, remainder = divmod(self.time, 3600)
         minutes, seconds = divmod(remainder, 60)
         return f'{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}'
-        
+
     def __repr__(self):
         return f'{self.__class__.__module__}.{self.__class__.__qualname__}({self.time})'
 
@@ -153,6 +153,9 @@ class Duration:
 
     def __float__(self):
         return float(self.time)
+
+    def __abs__(self):
+        return Duration(abs(self.time))
 
     def __round__(self, ndigits = None):
         return Duration(round(self.time, ndigits))
@@ -443,14 +446,14 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
     }
     reg_running = re.compile(r'size= *(\d+)kB')
     reg_time = re.compile(r' time=([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{2}) ')
-    args_video_archive = ('-c:v', 'libx264', '-crf', '23', '-preset', 'veryslow', '-an')
-    args_video_preview = ('-c:v', 'libsvtav1', '-qp', '63', '-preset', '8', '-an')
-    args_audio_archive = ('-c:a', 'libfdk_aac', '-vbr', '5', '-vn')
-    args_audio_preview = ('-c:a', 'libfdk_aac', '-vbr', '1', '-map', '0:a', '-vn')
+    args_video_archive = '-c:v', 'libx264', '-crf', '23', '-preset', 'veryslow'
+    args_video_preview = '-c:v', 'libsvtav1', '-qp', '63', '-preset', '8'
+    args_audio_archive = '-c:a', 'libopus', '-b:a', '128000'
+    args_audio_preview = '-c:a', 'libopus', '-b:a', '24000'
 
     @staticmethod
-    def __log_cutter(log):
-        log = b''.join(log).split(b'\n')
+    def _log_cutter(log:list):
+        log = b''.join(log).split(b'\r\n')
         for paragraph_id, paragraph in enumerate(reversed(log)):
             lines = paragraph.split(b'\r')
             if len(lines) > 1:
@@ -484,13 +487,13 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
             self.returncode = self.p.wait()
         return self.returncode
 
-    def __refuse_null(self):
+    def _refuse_null(self):
         if self.null:
             self.p.kill()
             raise ValueError('Polling from void')
 
     def poll_time(self):  
-        self.__refuse_null()
+        self._refuse_null()
         chars = []
         Ffmpeg.log.debug(f'Started {self.p}')
         while True:
@@ -502,15 +505,15 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
         Ffmpeg.log.debug(f'Ended {self.p}')
         self.returncode = self.p.wait()
         if self.returncode == 0:
-            last, lines = Ffmpeg.__log_cutter(chars)
+            last, lines = Ffmpeg._log_cutter(chars)
             for line in reversed(lines):
-                t = Ffmpeg.reg_time.search(line)
+                t = Ffmpeg.reg_time.search(line.decode('utf-8'))
                 if t:
                     return self.returncode, Duration(t[1])
         return self.returncode, None
 
     def poll_time_size(self, stream_type:str='video'):
-        self.__refuse_null()
+        self._refuse_null()
         chars = []
         Ffmpeg.log.debug(f'Started {self.p}')
         while True:
@@ -522,18 +525,17 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
         Ffmpeg.log.debug(f'Ended {self.p}')
         self.returncode = self.p.wait()
         if self.returncode == 0:
-            last, lines = Ffmpeg.__log_cutter(chars)
-            s = Ffmpeg.reg_complete[stream_type].search(last)
+            last, lines = Ffmpeg._log_cutter(chars)
+            s = Ffmpeg.reg_complete[stream_type].search(last.decode('utf-8'))
             if s:
                 for line in reversed(lines): # This line has frame=xxx, fps=xxx, size=xxx
-                    t = Ffmpeg.reg_time.search(line)
+                    t = Ffmpeg.reg_time.search(line.decode('utf-8'))
                     if t:
                         return self.returncode, Duration(t[1]), int(s[1]) * 1024
         return self.returncode, None, None
 
     def poll_size(self, stream_type:str='video',size_allow:int=0, file_out:pathlib.Path=None):
-        self.__refuse_null()
-        chars = []
+        self._refuse_null()
         Ffmpeg.log.debug(f'Started {self.p}')
         while True:
             Checker.is_end(self.p)
@@ -543,7 +545,6 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
             char = self.p.stderr.read(100)
             if char == b'':
                 break
-            chars.append(char)
         Ffmpeg.log.debug(f'Ended {self.p}')
         self.returncode = self.p.wait()
         return self.returncode, file_out.stat().size() >= size_allow
@@ -562,7 +563,7 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
         scope: child
             The EndExecution exception could be raised by check_end_kill, we pass it as is
         """
-        self.__refuse_null()
+        self._refuse_null()
         Ffmpeg.log.debug(f'Started {self.p}')
         if size_allow is not None:
             if file_out is None:
@@ -578,7 +579,7 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
             if char == b'':
                 break
             chars.append(char)
-        last, lines = Ffmpeg.__log_cutter(chars)
+        last, lines = Ffmpeg._log_cutter(chars)
         if file_out is None:
             s = Ffmpeg.reg_complete[stream_type].search(last)
         else:
@@ -613,22 +614,23 @@ class Video:
                 self.streams = []
                 self.audios = []
                 self.videos = []
-                video = False
                 for stream_id, stream in enumerate(
-                    json.loads(Ffprobe(('-show_self.streams', '-of', 'json', path)).stdout)['self.streams']
+                    json.loads(Ffprobe(('-show_streams', '-of', 'json', path)).stdout)['streams']
                 ):
                     #log_scanner.info(f'Getting stream information for stream {stream_id} from {i}')
                     stream_type = stream['codec_type'] 
                     if stream_type in ('video', 'audio'):
                         stream_duration, stream_size = Stream.get_duration_and_size(path, stream_id, stream_type)
-                        stream = Stream(stream_id, stream_type, stream_duration, stream_size, stream)
+                        stream = Stream(self, stream_id, stream_type, stream_duration, stream_size, stream)
                         self.streams.append(stream)
                         if stream_type == 'video':
                             self.videos.append(stream)
+                        else:
+                            self.audios.append(stream)
                     else:
                         self.streams.append(None)
                 if self.videos:
-                    self.__len = len(self.streams)
+                    self._len = len(self.streams)
                     return
         raise NotVideo
 
@@ -642,12 +644,15 @@ class Video:
         return f'{self.__class__.__module__}.{self.__class__.__qualname__}({self.raw})'
 
     def __len__(self):
-        return self.__len
+        return self._len
 
     def __getitem__(self, key):
         if not isinstance(key, int) and (key > self.len or key < -self.len - 1):
             raise KeyError(f'{key} is not a valid stream id')
         return self.streams[key]
+
+    def get_audio_count(self):
+        return len(self.audios)
 
     def start(self, dir_work_sub:pathlib.Path):
         self.work = dir_work_sub  # The work dir is also used as a key
@@ -667,7 +672,7 @@ class Video:
             else:
                 if work_archive:
                     streams_archive.append(stream.prepare('archive'))
-                if not amix and work_preview:
+                if stream.type == 'video' or not amix and work_preview:
                     streams_preview.append(stream.prepare('preview'))
         if amix and work_preview:
             streams_preview.append(self.audios[0].prepare('preview', True))
@@ -698,7 +703,7 @@ class Video:
         thread = threading.Thread(target=self.clean)
         thread.start()
         log_main.debug(f'Spawned thread {thread}')
-        Pool.Work.add(self.raw)
+        Pool.add_work(self.raw)
 
     def mux(self, encode_type:str, streams: list):
         log = LoggingWrapper(f'[{self.name}] M:{encode_type.capitalize()[:1]}')
@@ -726,8 +731,13 @@ class Video:
         except EndExecution:
             log.debug(f'Ending thread {threading.current_thread()}')
             return
-        shutil.move(file_work, self.archive)
-        log.info(f'Muxed to {self.archive}')
+        if encode_type == 'archive':
+            file_out = self.archive
+        else:
+            file_out = self.preview
+        shutil.move(file_work, file_out)
+        log.info(f'Muxed to {file_out}')
+
 
     def clean(self):
         """Cleaning the work directory and the raw file
@@ -742,7 +752,7 @@ class Video:
 
             Should that, or the end_work flag be captured, return to end this thread
         """
-        log = LoggingWrapper(f'[{self.name}] C')
+        log = LoggingWrapper(f'[{self.name}] CLR')
         try:
             for thread in Pool.get_threads('muxer', self.key):
                 Checker.join(thread)
@@ -752,7 +762,7 @@ class Video:
             shutil.rmtree(self.work)
             self.raw.unlink()
             Checker.is_end()
-            Database.remove(self.raw)
+            db.remove(self.raw)
             Pool.remove_work(self.raw)
         except EndExecution:
             log.debug(f'Ending thread {threading.current_thread()}')
@@ -851,7 +861,7 @@ class Stream:
                 return file_out
             else:
                 file_done.unlink()
-        thread = threading.Thread(target=self.encode, args=(encode_type, file_out, file_done))
+        thread = threading.Thread(target=self.encode, args=(encode_type, file_out, file_done, amix))
         Pool.add_thread(encode_type, self.parent.key, thread)
         log_main.debug(f'Spawned thread {thread}')
         return file_out
@@ -884,7 +894,7 @@ class Stream:
         concat_list = []
         start = Duration()
         size_exist = 0
-        file_concat_pickle = self.parent.work / f'{self.__prefix}_concat.pkl'
+        file_concat_pickle = self.parent.work / f'{prefix}_concat.pkl'
         try:
             # Recovery
             if file_out.exists():
@@ -944,7 +954,7 @@ class Stream:
                                 log.info('Recovering usable audio frames')
                                 p = Ffmpeg(('-i', file_out, '-c', 'copy', '-map', '0', '-y', file_recovery))
                             if isinstance(p, Ffmpeg):
-                                r, t = p.poll_time(self.type)
+                                r, t = p.poll_time()
                                 if r:
                                     log.warning('Recovery failed, retrying that later')
                                 else:
@@ -954,7 +964,6 @@ class Stream:
                                     concat_list.append(file_check.name)
                                     log.info(f'{t} of failed transcode recovered. Total: duration:{start}, size{size_exist}')
                                     break
-                        file_out.unlink()
                         with Checker.context(open(file_concat_pickle, 'wb')) as f:
                             pickle.dump((concat_list, start, size_exist), f)
                 file_out.unlink()      
@@ -994,8 +1003,8 @@ class Stream:
                 else:
                     arg_map = '0:a'
                     args_codec = Ffmpeg.args_audio_preview
-                    args_filter = '-filter_complex', f'amix=inputs={len(self.parent)}:duration=longest'
-            args = '-ss', str(start), '-i', self.parent.raw, *args_codec, *args_filter, arg_map, '-y', file_out
+                    args_filter = '-filter_complex', f'amix=inputs={self.parent.get_audio_count()}:duration=longest'
+            args = '-ss', str(start), '-i', self.parent.raw, *args_codec, *args_filter, '-map', arg_map, '-y', file_out
             while True:
                 log.info('Transcode started')
                 Checker.is_end()
@@ -1048,12 +1057,16 @@ class Stream:
         length = clamp(int(math.log(self.duration.seconds()/2 + 1)), 1, 10)
         if length == 1:
             log = LoggingWrapper(f'[{self.parent.name}] S')
-            args = ('-ss', str(self.duration/2), '-i', self.parent.path, '-map', f'0:{self.id}', *args_out)
+            args = ('-ss', str(self.duration/2), '-i', self.parent.raw, '-map', f'0:{self.id}', *args_out)
             prompt = 'Taking screenshot, single frame'
         else:
             log = LoggingWrapper(f'[{self.parent.name}] S:{self.id}')
             if self.rotation in (90, -90):
-                stream_width, stream_height = stream_height, stream_width
+                stream_width = self.width
+                stream_height = self.height
+            else:
+                stream_width = self.width
+                stream_height = self.height
             width = stream_width * length
             height = stream_height * length
             if width > 65535 or length > 65535:
@@ -1068,7 +1081,7 @@ class Stream:
             time_delta = self.duration / tiles
             if self.duration < tiles:
                 args = (
-                    '-i', self.parent.path, '-map', f'0:{self.id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta.seconds()}),tile={length}x{length}{arg_scale}', *args_out
+                    '-i', self.parent.raw, '-map', f'0:{self.id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta.seconds()}),tile={length}x{length}{arg_scale}', *args_out
                 )
             else:
                 time_start = Duration(0)
@@ -1079,7 +1092,7 @@ class Stream:
                 for i in range(length):
                     for j in range(length):
                         Checker.is_end()
-                        args_input.extend(('-ss', str(time_start), '-i', self.parent.path))
+                        args_input.extend(('-ss', str(time_start), '-i', self.parent.raw))
                         args_mapper.append(f'[{file_id}:{self.id}]')
                         args_position.append(f'{j*stream_width}_{i*stream_height}')
                         time_start += time_delta
@@ -1143,19 +1156,19 @@ class Checker:
             t -= 1
 
     @contextlib.contextmanager
-    def context(cls, manager, p:subprocess.Popen=None):
-        if cls.end_flag:
+    def context(manager, p:subprocess.Popen=None):
+        if Checker.end_flag:
             raise EndExecution
         with manager as f:
             yield f
-        if cls.end_flag:
+        if Checker.end_flag:
             raise EndExecution
 
 
 class Database:
 
     def __init__(self, backend):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.log = LoggingWrapper('[Database]')
         self.backend = backend
         self.db = {}
@@ -1277,7 +1290,7 @@ class Pool:
     _event_scheduler = threading.Event()
 
     @classmethod
-    def _wake(cls):
+    def wake(cls):
         cls._event_scheduler.set()
 
     @classmethod
@@ -1455,7 +1468,6 @@ def scan_dir(d: pathlib.Path):
             scan_dir(i)
         elif i.is_file() and not db.query(i):
             wait_close(i)
-            db_entry = None
             if not db.query(i):
                 log_scanner.info(f'Discovered {i}')
                 try:
@@ -1497,9 +1509,8 @@ if __name__ == '__main__':
             db.clean()
             scan_dir(dir_raw)
             for path, video in db.items():
-                if path is not None and not Pool.query_work(path):
-                    video = Video()
-                    dir_work / video.name
+                if video is not None and not Pool.query_work(path):
+                    dir_work_sub = dir_work / video.name
                     if dir_work_sub in dirs_work_sub:
                         suffix = 0
                         while dir_work_sub in dirs_work_sub or (dir_work_sub.exists() and not dir_work_sub.is_dir()):
