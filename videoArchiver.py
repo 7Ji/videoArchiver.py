@@ -2,6 +2,7 @@ if __name__ != '__main__':
     raise RuntimeError('REFUSED to be imported, you should only run this as sciprt! (i.e. python videoArchiver.py, or python -m videoArchiver) Most functions are heavily dependent on global variables only set in the main body to reduce memory usage. If you really want to test this as a module, you could capture this RuntimeError, but videoArchiver.py is not guaranteed to not fuck up your computer')
     
 
+import datetime
 import threading
 import subprocess
 import json
@@ -31,24 +32,24 @@ class CleanPrinter:
     lock_bar = threading.Lock()
     width = shutil.get_terminal_size()[0]
 
-    @staticmethod
-    def check_terminal():
+    @classmethod
+    def check_terminal(cls):
         width = shutil.get_terminal_size()[0]
-        if width == CleanPrinter.width:
+        if width == cls.width:
             return 
-        CleanPrinter.width = width
+        cls.width = width
 
-    @staticmethod
-    def clear_line():
+    @classmethod
+    def clear_line(cls):
         """Always clean the line before printing, this is to avoid the unfinished progress bar being stuck on the screen
         """
-        print(' ' * CleanPrinter.width, end='\r')
+        print(' ' * cls.width, end='\r')
 
-    @staticmethod
-    def print(content, loglevel=logging.INFO, end=None):
-        CleanPrinter.check_terminal()
-        if CleanPrinter.bars: # Only clear line if there are progress bars being displayed
-            CleanPrinter.clear_line()
+    @classmethod
+    def print(cls, content, loglevel=logging.INFO, end=None):
+        cls.check_terminal()
+        if cls.bars: # Only clear line if there are progress bars being displayed
+            cls.clear_line()
         if end is None:
             print(content)
         else:
@@ -131,6 +132,11 @@ class Duration:
     def seconds(self):
         return self.time
 
+    def hms(self):
+        hours, remainder = divmod(self.time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f'{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}'
+        
     def __repr__(self):
         return f'{self.__class__.__module__}.{self.__class__.__qualname__}({self.time})'
 
@@ -317,7 +323,7 @@ class ProgressBar(CleanPrinter):
         self.bar_complete = -1
         self.bar_complete_str = ''
         self.time_start = datetime.datetime.today()
-        self.time_spent = time_zero
+        self.time_spent = Duration(0)
         self.time_estimate = None
         self.time_spent_str = ' S:00:00:00'
         self.time_estimate_str = ' R:--:--:--'
@@ -643,20 +649,12 @@ class Video:
             raise KeyError(f'{key} is not a valid stream id')
         return self.streams[key]
 
-    @staticmethod
-    def __should_work(file_out:pathlib.Path, file_done:pathlib.Path):
-        if file_done.exists():
-            if file_out.exists():
-                return False
-            else:
-                file_done.unlink()
-        return True
-
     def start(self, dir_work_sub:pathlib.Path):
-        self.work = dir_work_sub
+        self.work = dir_work_sub  # The work dir is also used as a key
         self.archive = dir_archive / f'{self.name}.mkv'  # It's determined here so the output path can be updated before encoding
         self.preview = dir_preview / f'{self.name}.mkv'
-        threads_archive, threads_preview, threads_muxer, threads_screenshot, streams_archive, streams_preview = ([] for i in range(6))
+        self.key = Pool.add_threads()
+        streams_archive, streams_preview = ([] for i in range(2))
         amix = len(self.audios) > 1
         work_archive = not self.archive.exists()
         work_preview = not self.preview.exists()
@@ -668,52 +666,25 @@ class Video:
                     streams_preview.append(None)
             else:
                 if work_archive:
-                    file_out = self.work / f'{self.name}_archive_{stream.id}_{stream.type}.nut'
-                    file_done = self.work / f'{self.name}_archive_{stream.id}_{stream.type}.done'
-                    if Video.__should_work(file_out, file_done):
-                        threads_archive.append(threading.Thread(target=stream.encode, args=('archive', file_out, file_done)))
-                        threads_archive[-1].start()
-                        streams_archive.append(file_out)
-                    else:
-                        streams_archive.append(None)
+                    streams_archive.append(stream.prepare('archive'))
                 if not amix and work_preview:
-                    file_out = self.work / f'{self.name}_preview_{stream.id}_{stream.type}.nut'
-                    file_done = self.work / f'{self.name}_preview_{stream.id}_{stream.type}.done'
-                    if Video.__should_work(file_out, file_done):
-                        threads_preview.append(threading.Thread(target=stream.encode, args=('preview', file_out, file_done)))
-                        threads_preview[-1].start()
-                        streams_preview.append(file_out)
-                    else:
-                        streams_preview.append(None)
-        if amix:
-            file_out = self.work / f'{self.name}_preview_amix.nut'
-            file_done = self.work / f'{self.name}_preview_amix.done'
-            if Video.__should_work(file_out, file_done):
-                threads_preview.append(threading.Thread(target=self.audios[0].encode, args=('preview', file_out, file_done, True)))
+                    streams_preview.append(stream.prepare('preview'))
+        if amix and work_preview:
+            streams_preview.append(self.audios[0].prepare('preview', True))
         if work_archive:
-            threads_muxer.append(threading.Thread(target=muxer, args=(
-                i, dir_work_sub / f'{i.stem}_archive.mkv', file_archive,
-                streams_archive, threads_archive
-            )))
-            log_main.debug(f'Spawned thread {threads_muxer[-1]}')
-            threads_muxer[-1].start()
+            thread = threading.Thread(target=self.mux, args=('archive', streams_archive))
+            Pool.add_thread('muxer', self.key, thread)
+            log_main.debug(f'Spawned thread {thread}')
         if work_preview:
-            if audios:
-                streams_preview, threads_preview = thread_adder(dir_work_sub, i, 'preview', len(audios), 'audio', audios_duration, audios_size, True, 0, 0, streams_preview, threads_preview, True)
-            threads_muxer.append(threading.Thread(target=muxer, args=(
-                i, dir_work_sub / f'{i.stem}_preview.mkv', file_preview,
-                streams_preview, threads_preview
-            )))
-            log_main.debug(f'Spawned thread {threads_muxer[-1]}')
-            threads_muxer[-1].start()
-
-        
+            thread = threading.Thread(target=self.mux, args=('preview', streams_preview))
+            Pool.add_thread('muxer', self.key, thread)
+            log_main.debug(f'Spawned thread {thread}')
         if len(self.videos) == 1:
             file_screenshot = dir_screenshot / f'{self.name}.jpg'
             if not file_screenshot.exists():
-                threads_screenshot.append(threading.Thread(target=self.videos[0].screenshot))
-                log_main.debug(f'Spawned thread {threads_screenshot[-1]}')
-                threads_screenshot[0].start()
+                thread = threading.Thread(target=self.videos[0].screenshot)
+                Pool.add_thread('screenshot', self.key, thread)
+                log_main.debug(f'Spawned thread {thread}')
         else:
             dir_screenshot_sub = dir_screenshot / self.name
             if not dir_screenshot_sub.exists():
@@ -721,20 +692,18 @@ class Video:
             for stream in self.videos:
                 file_screenshot = dir_screenshot_sub / f'{self.name}_{stream.id}.jpg'
                 if not file_screenshot.exists():
-                    threads_screenshot.append(threading.Thread(target=stream.screenshot, args=(dir_screenshot_sub, )))
-                    log_main.debug(f'Spawned thread {threads_screenshot[-1]}')
-                    threads_screenshot[-1].start()
-        
-        thread_cleaner = threading.Thread(target=cleaner, args=(dir_work_sub, i, threads_screenshot + threads_muxer))
-        log_main.debug(f'Spawned thread {thread_cleaner}')
-        thread_cleaner.start()
-        Pool.Work.add(i)
+                    thread = threading.Thread(target=stream.screenshot, args=(dir_screenshot_sub, ))
+                    Pool.add_thread('screenshot', self.key, thread)
+                    log_main.debug(f'Spawned thread {thread}')
+        thread = threading.Thread(target=self.clean)
+        thread.start()
+        log_main.debug(f'Spawned thread {thread}')
+        Pool.Work.add(self.raw)
 
-    def muxer(self, encode_type:str, file_cache: pathlib.Path, file_out: pathlib.Path, streams: list, threads: list = None,
-    ):
-        log = LoggingWrapper(f'[{self.name}] M:{encode_type}')
+    def mux(self, encode_type:str, streams: list):
+        log = LoggingWrapper(f'[{self.name}] M:{encode_type.capitalize()[:1]}')
         try:
-            for thread in threads:
+            for thread in Pool.get_threads(encode_type, self.key):
                 Checker.join(thread)
             inputs = ['-i', self.raw]
             input_id = 0
@@ -747,8 +716,9 @@ class Video:
                     inputs += ['-i', stream]
                     input_id += 1
                     mappers += ['-map', f'{input_id}']
-            log.info(f'Muxing to {file_out}...')
-            args = (*inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_cache)
+            log.info(f'Muxing to {self.archive}...')
+            file_work = self.work / f'{self.name}_{encode_type}.mkv'
+            args = (*inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_work)
             while Ffmpeg(args, null=True).poll_dumb():
                 Checker.is_end()
                 log.warning(f'Muxing failed, retry that later')
@@ -756,16 +726,10 @@ class Video:
         except EndExecution:
             log.debug(f'Ending thread {threading.current_thread()}')
             return
-        shutil.move(file_cache, file_out)
-        log.info(f'Muxed to {file_out}')
+        shutil.move(file_work, self.archive)
+        log.info(f'Muxed to {self.archive}')
 
-
-
-    def cleaner(
-        dir_work_sub: pathlib.Path,
-        file_raw: pathlib.Path,
-        threads: list
-    ):
+    def clean(self):
         """Cleaning the work directory and the raw file
 
         cleaner itself (scope: child/cleaner)
@@ -778,16 +742,18 @@ class Video:
 
             Should that, or the end_work flag be captured, return to end this thread
         """
-        log = LoggingWrapper(f'[{file_raw.name}]')
+        log = LoggingWrapper(f'[{self.name}] C')
         try:
-            for thread in threads:
+            for thread in Pool.get_threads('muxer', self.key):
                 Checker.join(thread)
-            log.info(f'Cleaning input and {dir_work_sub}...')
-            shutil.rmtree(dir_work_sub)
-            file_raw.unlink()
+            for thread in Pool.get_threads('screenshot', self.key):
+                Checker.join(thread)
+            log.info(f'Cleaning input and {self.work}...')
+            shutil.rmtree(self.work)
+            self.raw.unlink()
             Checker.is_end()
-            Database.remove(file_raw)
-            Pool.Work.remove(file_raw)
+            Database.remove(self.raw)
+            Pool.remove_work(self.raw)
         except EndExecution:
             log.debug(f'Ending thread {threading.current_thread()}')
             return
@@ -873,6 +839,23 @@ class Stream:
         log.info('Concating done')
         file_done.touch()
 
+    def prepare(self, encode_type:str, amix:bool=False):
+        if amix:
+            file_out = self.parent.work / f'{self.parent.name}_preview_amix.nut'
+            file_done = self.parent.work / f'{self.parent.name}_preview_amix.done'
+        else:
+            file_out = self.parent.work / f'{self.parent.name}_archive_{self.id}_{self.type}.nut'
+            file_done = self.parent.work / f'{self.parent.name}_archive_{self.id}_{self.type}.done'
+        if file_done.exists():
+            if file_out.exists():
+                return file_out
+            else:
+                file_done.unlink()
+        thread = threading.Thread(target=self.encode, args=(encode_type, file_out, file_done))
+        Pool.add_thread(encode_type, self.parent.key, thread)
+        log_main.debug(f'Spawned thread {thread}')
+        return file_out
+
     def encode(self, encode_type:str, file_out:pathlib.Path, file_done:pathlib.Path, amix:bool=False):
         """Encoding certain stream in a media file
 
@@ -894,7 +877,7 @@ class Stream:
             log = LoggingWrapper(f'[{self.parent.name}] E:P S:Amix')
             prefix = f'{self.parent.name}_preview_audio'
         else:
-            log = LoggingWrapper(f'[{self.parent.name}] E:{encode_type[:1].capitalize()} S:{self.id}:{self.type[:1].capitalize()}')
+            log = LoggingWrapper(f'[{self.parent.name}] E:{encode_type[:1].upper()} S:{self.id}:{self.type[:1].upper()}')
             prefix = f'{self.parent.name}_{encode_type}_{self.id}_{self.type}'
         log.info('Work started')
         check_efficiency = encode_type == 'archive'  and not self.lossless 
@@ -1123,165 +1106,17 @@ class Stream:
         shutil.move(file_work, file_out)
 
 
-def wait_close(file_raw:pathlib.Path):
-    """Check if a file is being opened, if it is, wait until it's closed
-
-    used in scan_dir (scope: main)
-
-    scope: main
-        End when KeyboardException is captured
-    """
-    size_old = file_raw.stat().st_size
-    hint = False
-    log = LoggingWrapper('[Scanner]')
-    while True:
-        opened = False
-        for p in psutil.process_iter():
-            try:
-                for f in p.open_files():
-                    if file_raw.samefile(f.path):
-                        if not hint:
-                            log.warning(f'Jammed, {file_raw} is opened by {p.pid} {p.cmdline()}')
-                            hint = True
-                        opened = True
-                        break
-            except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError):
-                pass
-        size_new = file_raw.stat().st_size
-        if size_new != size_old:
-            opened = True
-            if not hint:
-                log.warning(f'Jammed, {file_raw} is being written')
-        if not opened:
-            if hint:
-                log.info(f'{file_raw} closed writing, continue scanning')
-            break
-        size_old = size_new
-        Checker.sleep(5)
-
-
-def scan_dir(d: pathlib.Path):
-    """Recursively scan dirs, 
-
-    used in main (scope: main)
-    used in scan_dir recursively (scope: main)
-    
-    scope: main
-        End when KeyboardException is captured
-    """
-    log_scanner.debug(f'Scanning {d}')
-    for i in d.iterdir():
-        if i.is_dir():
-            scan_dir(i)
-        elif i.is_file() and not db.query(i):
-            wait_close(i)
-            db_entry = None
-            if not db.query(i):
-                log_scanner.info(f'Discovered {i}')
-                try:
-                    db_entry = Video(i)
-                    log_scanner.info(f'Added {i} to db')
-                    log_scanner.debug(f'{i} streams: {db_entry.streams}')
-                except NotVideo:
-                    db_entry = None
-                except EndExecution:
-                    return
-            db.add(i, db_entry)
-
-
-def muxer(
-    file_raw: pathlib.Path,
-    file_cache: pathlib.Path,
-    file_out: pathlib.Path,
-    streams: list,
-    threads: list = None,
-):
-    """Muxing finished video/audio streams and non va streams from raw file to a new mkv container
-
-    muxer itself (scopte: child/muxer)
-
-    scope: child-main
-        As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
-            join
-            check_end
-            ffmpeg_dumb_poller
-
-        Should that, return to end this thread
-    """
-    log = LoggingWrapper(f'[{file_raw.name}]')
-    try:
-        if threads is not None and threads:
-            for thread in threads:
-                Checker.join(thread)
-        inputs = ['-i', file_raw]
-        input_id = 0
-        mappers = []
-        for stream_id, stream in enumerate(streams):
-            Checker.is_end()
-            if stream is None:
-                mappers += ['-map', f'0:{stream_id}']
-            else:
-                inputs += ['-i', stream]
-                input_id += 1
-                mappers += ['-map', f'{input_id}']
-        log.info(f'Muxing to {file_out}...')
-        args = (*inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_cache)
-        while Ffmpeg(args, null=True).poll_dumb():
-            Checker.is_end()
-            log.warning(f'Muxing failed, retry that later')
-            Checker.sleep(5)
-    except EndExecution:
-        log.debug(f'Ending thread {threading.current_thread()}')
-        return
-    shutil.move(file_cache, file_out)
-    log.info(f'Muxed to {file_out}')
-
-
-
-def cleaner(
-    dir_work_sub: pathlib.Path,
-    file_raw: pathlib.Path,
-    threads: list
-):
-    """Cleaning the work directory and the raw file
-
-    cleaner itself (scope: child/cleaner)
-
-    scope: child-main
-        As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
-            join
-            check_end
-            db_write
-
-        Should that, or the end_work flag be captured, return to end this thread
-    """
-    log = LoggingWrapper(f'[{file_raw.name}]')
-    try:
-        for thread in threads:
-            Checker.join(thread)
-        log.info(f'Cleaning input and {dir_work_sub}...')
-        shutil.rmtree(dir_work_sub)
-        file_raw.unlink()
-        Checker.is_end()
-        Database.remove(file_raw)
-        Pool.Work.remove(file_raw)
-    except EndExecution:
-        log.debug(f'Ending thread {threading.current_thread()}')
-        return
-    log.info('Done')
-
-
 class Checker:
     end_flag = False
-    @staticmethod
-    def is_end(p:subprocess.Popen=None):
-        if Checker.end_flag:
+    @classmethod
+    def is_end(cls, p:subprocess.Popen=None):
+        if cls.end_flag:
             if p is not None:
                 p.kill()
             raise EndExecution
 
-    @staticmethod
-    def join(thread: threading.Thread):
+    @classmethod
+    def join(cls, thread: threading.Thread):
         """Cleanly join a thread, just an invoker so that the work_end flag can be captured
 
         used in muxer (scope: child/muxer)
@@ -1290,30 +1125,30 @@ class Checker:
         scope: child
             The EndExecution flag could be raised by check_end, we pass it as is
         """
-        if Checker.end_flag:
+        if cls.end_flag:
             raise EndExecution
         thread.join()
-        if Checker.end_flag:
+        if cls.end_flag:
             raise EndExecution
 
-    @staticmethod
-    def end():
-        Checker.end_flag = True
+    @classmethod
+    def end(cls):
+        cls.end_flag = True
 
-    @staticmethod
-    def sleep(t:int=5):
+    @classmethod
+    def sleep(cls, t:int=5):
         while t:
-            Checker.is_end()
+            cls.is_end()
             time.sleep(1)
             t -= 1
 
     @contextlib.contextmanager
-    def context(manager, p:subprocess.Popen=None):
-        if Checker.end_flag:
+    def context(cls, manager, p:subprocess.Popen=None):
+        if cls.end_flag:
             raise EndExecution
         with manager as f:
             yield f
-        if Checker.end_flag:
+        if cls.end_flag:
             raise EndExecution
 
 
@@ -1428,40 +1263,41 @@ class Database:
 
 
 class Pool:
-    pool_264, pool_av1, pool_ss, pool_work = ([] for i in range(4))
-    lock_264, lock_av1, lock_ss, lock_work = (threading.Lock() for i in range(4))
-    cpu_percent = 0
-    cpu_264 = 50
-    cpu_av1 = 60
-    cpu_ss = 90
-    prompt_264 = 'Waked up an x264 encoder'
-    prompt_av1 = 'Waked up an av1 encoder'
-    prompt_ss = 'Waked up a screenshooter'
-    log = LoggingWrapper('[Scheduler]')
-    e = threading.Event()
+    _pool_264, _pool_av1, _pool_ss, _pool_work, _threads_archive, _threads_preview, _threads_muxer, _threads_screenshot = ([] for i in range(8))
+    _threads_id = -1
+    _lock_264, _lock_av1, _lock_ss, _lock_work = (threading.Lock() for i in range(4))
+    _cpu_percent = 0
+    _cpu_264 = 50
+    _cpu_av1 = 60
+    _cpu_ss = 90
+    _prompt_264 = 'Waked up an x264 encoder'
+    _prompt_av1 = 'Waked up an av1 encoder'
+    _prompt_ss = 'Waked up a screenshooter'
+    _log = LoggingWrapper('[Scheduler]')
+    _event_scheduler = threading.Event()
 
-    @staticmethod
-    def wake():
-        Pool.e.set()
+    @classmethod
+    def _wake(cls):
+        cls._event_scheduler.set()
 
-    @staticmethod
-    def update_cpu_percent():
-        Pool.cpu_percent = psutil.cpu_percent()
-        Pool.log.debug(f'CPU usage: {Pool.cpu_percent}')
+    @classmethod
+    def _update_cpu_percent(cls):
+        cls._cpu_percent = psutil.cpu_percent()
+        cls._log.debug(f'CPU usage: {cls._cpu_percent}')
 
-    @staticmethod
-    def waker(pool, lock, cpu_need, prompt):
-        while Pool.cpu_percent < cpu_need and pool:
+    @classmethod
+    def _waker(cls, pool, lock, cpu_need, prompt):
+        while cls._cpu_percent < cpu_need and pool:
             Checker.is_end()
             with lock:
                 Checker.is_end()
                 pool.pop(0).set()
-                Pool.log.info(prompt)
+                cls._log.info(prompt)
             Checker.sleep(5)
-            Pool.update_cpu_percent()
+            cls._update_cpu_percent()
 
-    @staticmethod
-    def wait(log, style):
+    @classmethod
+    def wait(cls, log, style):
         """Wait for CPU resource,
 
         used in encoder (scope: child/encoder)
@@ -1472,69 +1308,165 @@ class Pool:
         """
         match style:
             case '264' | 'archive':
-                lock = Pool.lock_264
-                pool = Pool.pool_264
+                lock = cls._lock_264
+                pool = cls._pool_264
             case 'av1' | 'preview':
-                lock = Pool.lock_av1
-                pool = Pool.pool_av1
+                lock = cls._lock_av1
+                pool = cls._pool_av1
             case 'ss' | 'screenshot':
-                lock = Pool.lock_ss
-                pool = Pool.pool_ss
+                lock = cls._lock_ss
+                pool = cls._pool_ss
         log.info('Waiting for CPU resources')
         waiter = threading.Event()
         log.debug(f'Waiting for {waiter} to be set')
         with Checker.context(lock):
             pool.append(waiter)
-        Pool.e.set()
+        cls._event_scheduler.set()
         waiter.wait()
         Checker.is_end()
         log.info('Waked up')
-    
 
-    class Work:
-        @staticmethod
-        def add(entry):
-            with Checker.context(Pool.lock_work):
-                Pool.pool_work.append(entry)
+    @classmethod
+    def add_work(cls, entry):
+        with Checker.context(cls._lock_work):
+            cls._pool_work.append(entry)
 
-        @staticmethod
-        def remove(entry):
-            with Checker.context(Pool.lock_work):
-                Pool.pool_work.remove(entry)
+    @classmethod
+    def remove_work(cls, entry):
+        with Checker.context(cls._lock_work):
+            cls._pool_work.remove(entry)
 
-        @staticmethod
-        def query(entry):
-            with Checker.context(Pool.lock_work):
-                if entry in Pool.pool_work:
-                    return True
-            return False
+    @classmethod
+    def query_work(cls, entry):
+        with Checker.context(cls._lock_work):
+            if entry in cls._pool_work:
+                return True
+        return False
 
+    @classmethod
+    def add_threads(cls):
+        cls._threads_archive.append([])
+        cls._threads_preview.append([])
+        cls._threads_muxer.append([])
+        cls._threads_screenshot.append([])
+        cls._threads_id += 1
+        return cls._threads_id
 
-    @staticmethod
-    def scheduler():
-        Pool.log.info('Started')
+    @classmethod
+    def add_thread(cls, pool, threads_id, thread):
+        match pool:
+            case 'archive':
+                cls._threads_archive[threads_id].append(thread)
+            case 'preview':
+                cls._threads_preview[threads_id].append(thread)
+            case 'muxer':
+                cls._threads_muxer[threads_id].append(thread)
+            case 'screenshot':
+                cls._threads_screenshot[threads_id].append(thread)
+        thread.start()
+
+    @classmethod
+    def get_threads(cls, pool, threads_id):
+        match pool:
+            case 'archive':
+                return cls._threads_archive[threads_id]
+            case 'preview':
+                return cls._threads_preview[threads_id]
+            case 'muxer':
+                return cls._threads_muxer[threads_id]
+            case 'screenshot':
+                return cls._threads_preview[threads_id]
+
+    @classmethod
+    def scheduler(cls):
+        cls._log.info('Started')
         while not work_end:
             try:
-                with Checker.context(Pool.lock_264), Checker.context(Pool.lock_av1), Checker.context(Pool.lock_ss):
-                    if not Pool.pool_264 and not Pool.pool_av1 and not Pool.pool_ss:
-                        Pool.e.clear()
+                with Checker.context(cls._lock_264), Checker.context(cls._lock_av1), Checker.context(cls._lock_ss):
+                    if not cls._pool_264 and not cls._pool_av1 and not cls._pool_ss:
+                        cls._event_scheduler.clear()
                 Checker.is_end()
-                Pool.e.wait()
+                cls._event_scheduler.wait()
                 Checker.is_end()
                 Checker.sleep(5)
-                Pool.update_cpu_percent()
-                Pool.waker(Pool.pool_264, Pool.lock_264, Pool.cpu_264, Pool.prompt_264)
-                Pool.waker(Pool.pool_av1, Pool.lock_av1, Pool.cpu_av1, Pool.prompt_av1)
-                Pool.waker(Pool.pool_ss, Pool.lock_ss, Pool.cpu_ss, Pool.prompt_ss)
+                cls._update_cpu_percent()
+                cls._waker(cls._pool_264, cls._lock_264, cls._cpu_264, cls._prompt_264)
+                cls._waker(cls._pool_av1, cls._lock_av1, cls._cpu_av1, cls._prompt_av1)
+                cls._waker(cls._pool_ss, cls._lock_ss, cls._cpu_ss, cls._prompt_ss)
             except EndExecution:
                 break
-        Pool.log.warning('Terminating, waking up all sleeping threads so they can end themselvies')
-        for waitpool in Pool.pool_264, Pool.pool_av1, Pool.pool_ss:
+        cls._log.warning('Terminating, waking up all sleeping threads so they can end themselvies')
+        for waitpool in cls._pool_264, cls._pool_av1, cls._pool_ss:
             while waitpool:
                 waiter = waitpool.pop(0)
                 waiter.set()
-                Pool.log.debug(f'Emergency wakeup: {waiter}')
-        Pool.log.debug(f'Ending thread {threading.current_thread()}')
+                cls._log.debug(f'Emergency wakeup: {waiter}')
+        cls._log.debug(f'Ending thread {threading.current_thread()}')
+
+
+def wait_close(file_raw:pathlib.Path):
+    """Check if a file is being opened, if it is, wait until it's closed
+
+    used in scan_dir (scope: main)
+
+    scope: main
+        End when KeyboardException is captured
+    """
+    size_old = file_raw.stat().st_size
+    hint = False
+    while True:
+        opened = False
+        for p in psutil.process_iter():
+            try:
+                for f in p.open_files():
+                    if file_raw.samefile(f.path):
+                        if not hint:
+                            log_scanner.warning(f'Jammed, {file_raw} is opened by {p.pid} {p.cmdline()}')
+                            hint = True
+                        opened = True
+                        break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError):
+                pass
+        size_new = file_raw.stat().st_size
+        if size_new != size_old:
+            opened = True
+            if not hint:
+                log_scanner.warning(f'Jammed, {file_raw} is being written')
+        if not opened:
+            if hint:
+                log_scanner.info(f'{file_raw} closed writing, continue scanning')
+            break
+        size_old = size_new
+        Checker.sleep(5)
+
+
+def scan_dir(d: pathlib.Path):
+    """Recursively scan dirs, 
+
+    used in main (scope: main)
+    used in scan_dir recursively (scope: main)
+    
+    scope: main
+        End when KeyboardException is captured
+    """
+    log_scanner.debug(f'Scanning {d}')
+    for i in d.iterdir():
+        if i.is_dir():
+            scan_dir(i)
+        elif i.is_file() and not db.query(i):
+            wait_close(i)
+            db_entry = None
+            if not db.query(i):
+                log_scanner.info(f'Discovered {i}')
+                try:
+                    db_entry = Video(i)
+                    log_scanner.info(f'Added {i} to db')
+                    log_scanner.debug(f'{i} streams: {db_entry.streams}')
+                except NotVideo:
+                    db_entry = None
+                except EndExecution:
+                    return
+            db.add(i, db_entry)
 
 
 # The main function starts here
@@ -1549,7 +1481,7 @@ if __name__ == '__main__':
         if not dir.exists():
             dir.mkdir()
     logging.basicConfig(
-        filename=dir_log / f'{time.strftime("%Y%m%d_%H%M%S", time.time())}.log', 
+        filename=dir_log / f'{datetime.datetime.today().strftime("%Y%m%d_%H%M%S")}.log', 
         format='%(asctime)s %(levelname)s: %(message)s',
         level=logging.DEBUG
     )
@@ -1565,17 +1497,17 @@ if __name__ == '__main__':
             db.clean()
             scan_dir(dir_raw)
             for path, video in db.items():
-                if path is not None and not Pool.Work.query(path):
+                if path is not None and not Pool.query_work(path):
                     video = Video()
                     dir_work / video.name
                     if dir_work_sub in dirs_work_sub:
                         suffix = 0
-                        while dir_work_sub in dirs_work_sub:
+                        while dir_work_sub in dirs_work_sub or (dir_work_sub.exists() and not dir_work_sub.is_dir()):
                             dir_work_sub = dir_work / (video.name + str(suffix))
                     if not dir_work_sub.exists():
                         dir_work_sub.mkdir()
                     video.start(dir_work_sub)
-                    Pool.Work.add(path)
+                    Pool.add_work(path)
             time.sleep(5)
     except KeyboardInterrupt:
         log_main.warning('Keyboard Interrupt received, exiting safely...')
