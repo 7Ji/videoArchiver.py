@@ -133,7 +133,7 @@ class Duration:
     def hms(self):
         hours, remainder = divmod(self.time, 3600)
         minutes, seconds = divmod(remainder, 60)
-        return f'{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d}'
+        return f'{hours:02.0f}:{minutes:02.0f}:{seconds:02.0f}'
 
     def __repr__(self):
         return f'{self.__class__.__module__}.{self.__class__.__qualname__}({self.time})'
@@ -142,9 +142,9 @@ class Duration:
         return self.time != 0
 
     def __str__(self):
-        hours, remainder = divmod(self.time, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        return f'{int(hours):02d}:{int(minutes):02d}:{seconds:0>12.9f}'
+        # hours, remainder = divmod(self.time, 3600)
+        # minutes, seconds = divmod(remainder, 60)
+        return str(self.time)
 
     def __int__(self):
         return int(self.time)
@@ -320,101 +320,99 @@ class Duration:
 class ProgressBar:
     """Progress bar with title, percent, spent/estimate time
     """
-    def __init__(self, log: LoggingWrapper = '[Title]'):
+    invalid_time = '--:--:--'
+    def __init__(self, log: LoggingWrapper, duration:Duration):
         with CleanPrinter.lock_bar:
             CleanPrinter.bars += 1
-        self.log = log
+        self._log = log
+        self._complete = Duration()
+        self._duration = duration
+        self._title_length = len(log.title)
+        self._bar_complete = -1
+        self._time_start = time.time()
+        self._time_spent = Duration()
         log.debug('Encoder started')
-        self.title_length = len(log.title)
-        self.percent = 0
-        self.percent_str = '  0%'
-        self.bar_complete = -1
-        self.bar_complete_str = ''
-        self.time_start = time.time()
-        self.time_spent = Duration(0)
-        self.time_estimate = None
-        self.time_encoded_str = ' E:00:00:00'
-        self.time_spent_str = ' S:00:00:00'
-        self.time_remaining_str = ' R:--:--:--'
-        self.display(True)
+        self._display(True)
 
 
-    def display(self, update=False):
-        if self.percent == 1:
-            with CleanPrinter.lock_bar:
-                CleanPrinter.bars -= 1
-            CleanPrinter.clear_line()
-            self.log.debug('Encoder exited')
+    def _display(self, update=False):
+        if CleanPrinter.check_terminal() or update:
+            self._display_bar = False
+            self._display_percent = False
+            self._display_remaining = False
+            self._display_encoded = False
+            self._display_spent = False
+            length = CleanPrinter.width - self._title_length  # 1 for bar
+            if length > 1:
+                self._display_bar = True
+                if length > 5:
+                    self._display_percent = True
+                    if length > 16:  # 11 for time_spent_str
+                        self._display_remaining = True
+                        if length > 27:  # 11 for time_estimate_str
+                            self._display_encoded = True
+                            if length > 38:
+                                self._display_spent = True
+                self._bar_length = CleanPrinter.width - self._title_length - 4 * self._display_percent - 11 * self._display_remaining - 11 * self._display_encoded - 11 * self._display_spent
+        if not self._display_bar:
+            return
+        percent = self._complete / self._duration
+        bar_complete = int(percent * self._bar_length)
+        if bar_complete != self._bar_complete:
+            bar_incomplete = self._bar_length - bar_complete
+            self._bar_complete = bar_complete
+            self._bar_complete_str = '█' * bar_complete
+            self._bar_incomplete_str = '-' * bar_incomplete
+        line_bar = self._bar_complete_str, self._bar_incomplete_str 
+        if self._display_percent:
+            line_percent = f'{percent:>4.0%}'
         else:
-            update = CleanPrinter.check_terminal() or update
-            if update:
-                self.display_bar = False
-                self.display_percent = False
-                self.display_remaining = False
-                self.display_encoded = False
-                self.display_spent = False
-                length = CleanPrinter.width - self.title_length  # 1 for bar
-                if length > 1:
-                    self.display_bar = True
-                    if length > 5:
-                        self.display_percent = True
-                        if length > 16:  # 12 for time_spent_str
-                            self.display_remaining = True
-                            if length > 27:  # 12 for time_estimate_str
-                                self.display_encoded = True
-                                if length > 38:
-                                    self.display_spent = True
-                    self.bar_length = CleanPrinter.width - self.title_length - 4 * self.display_percent - 11 * self.display_remaining - 11 * self.display_encoded - 11 * self.display_spent
-            if not self.display_bar:
-                return
-            bar_complete = int(self.percent * self.bar_length)
-            if bar_complete != self.bar_complete:
-                bar_incomplete = self.bar_length - bar_complete
-                self.bar_complete = bar_complete
-                self.bar_complete_str = '█' * bar_complete
-                self.bar_incomplete_str = '-' * bar_incomplete
-                if not update:
-                    update = True
-            line = [self.log.title, self.bar_complete_str, self.bar_incomplete_str]
-            if self.display_remaining:
-                time_spent = time.time() - self.time_start
-                if time_spent - self.time_spent > 1:
-                    self.time_spent = time_spent
-                    self.time_spent_str = ' S:' + Duration(time_spent).hms()
-                    if self.display_encoded:
-                        
-                        self.time_estimate = time_spent / self.percent - time_spent
-                        self.time_estimate_str = ' R:' + str_from_time(self.time_estimate)
-                    if not update:
-                        update = True
-                line.append(self.time_spent_str)
-            if self.display_estimate:
-                line.append(self.time_estimate_str)
-            if self.display_percent:
-                percent_str = f'{self.percent:>4.0%}'
-                if percent_str != self.percent_str:
-                    self.percent_str = percent_str
-                    if not update:
-                        update = True
-                line.append(self.percent_str)
-            if update:
-                print(''.join(line), end='\r')
-
-    def set(self, percent):
-        if percent != self.percent:
-            self.percent = clamp(percent, 0, 1)
-        self.log.debug(f'Encoding at {self.percent:%}')
-        self.display()
-
-    def set_fraction(self, numerator, denominator):
-        if type(numerator) == type(denominator):
-            percent = numerator / denominator
-            if percent != self.percent:
-                self.percent = clamp(percent, 0, 1)
-            self.log.debug(f'Encoding {numerator}/{denominator} at {self.percent:%}')
+            line_percent = ''
+        if self._display_remaining:
+            time_spent = time.time() - self._time_start
+            if percent:
+                line_remaining = ' R:', Duration(time_spent / percent - time_spent).hms()
+            else:
+                line_remaining = ' R:', ProgressBar.invalid_time
         else:
-            self.log.debug(f'Encoding at {self.percent:%}')
-        self.display()
+            line_remaining = ()
+        if self._display_encoded:
+            line_encoded = ' E:', self._complete.hms()
+        else:
+            line_encoded = ()
+        if self._display_spent:
+            line_spent = ' S:', Duration(time_spent).hms()
+        else:
+            line_spent = ()
+        print(''.join((self._log.title, *line_bar, *line_encoded, *line_spent, *line_remaining, line_percent, )), end='\r')
+
+    def refresh(self, complete:Duration):
+        self._log.debug(f'Encoded {complete} / {self._duration} seconds')
+        if complete - self._complete > 1:
+            self._complete = complete
+            self._display()
+
+    def finish(self):
+        CleanPrinter.clear_line()
+        with Checker.context(CleanPrinter.lock_bar):
+            CleanPrinter.bars -= 1
+        self._log.debug('Encoder exited')
+
+    # def set(self, percent):
+    #     if percent != self._percent:
+    #         self._percent = clamp(percent, 0, 1)
+    #     self._log.debug(f'Encoding at {self._percent:%}')
+    #     self._display()
+
+    # def set_fraction(self, numerator, denominator):
+    #     if type(numerator) == type(denominator):
+    #         percent = numerator / denominator
+    #         if percent != self._percent:
+    #             self._percent = clamp(percent, 0, 1)
+    #         self._log.debug(f'Encoding {numerator}/{denominator} at {self._percent:%}')
+    #     else:
+    #         self._log.debug(f'Encoding at {self._percent:%}')
+    #     self._display()
 
 
 class Ffprobe:
@@ -444,7 +442,8 @@ class Ffprobe:
 
 
 class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3 h264 encoding work
-
+    """Generate ffmpeg subprocesses, whose stderr can then be polled, during which many operations can be done. Since polling repeatedly will consume much resouce, multiple methods with different behaviours are provided instead of a single method accepting arguments to decide the behaviour.
+    """
     path = pathlib.Path(shutil.which('ffmpeg'))
     log = LoggingWrapper('[Subprocess]')
     reg_complete = {
@@ -453,7 +452,7 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
     }
     reg_running = re.compile(r'size= *(\d+)kB')
     reg_time = re.compile(r' time=([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{2}) ')
-    args_video_archive = '-c:v', 'libx264', '-crf', '23', '-preset', 'veryslow'
+    args_video_archive = '-c:v', 'libx264', '-crf', '18', '-preset', 'veryslow'
     args_video_preview = '-c:v', 'libsvtav1', '-qp', '63', '-preset', '8'
     args_audio_archive = '-c:a', 'libopus', '-b:a', '128000'
     args_audio_preview = '-c:a', 'libopus', '-b:a', '10000'
@@ -499,6 +498,26 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
             self.p.kill()
             raise ValueError('Polling from void')
 
+    def poll_dumb_display_time(self, progress_bar:ProgressBar):
+        self._refuse_null()
+        chars = []
+        Ffmpeg.log.debug(f'Started {self.p}')
+        while True:
+            Checker.is_end(self.p)
+            char = self.p.stderr.read(100)
+            if char == b'':
+                progress_bar.finish()
+                break
+            chars.append(char)
+            t = Ffmpeg.reg_time.findall(b''.join(chars).decode('utf-8'))
+            if t:
+                complete = Duration(t[-1])
+                progress_bar.refresh(complete)
+                chars = []
+        Ffmpeg.log.debug(f'Ended {self.p}')
+        self.returncode = self.p.wait()
+        return self.returncode
+
     def poll_time(self):  
         self._refuse_null()
         chars = []
@@ -520,6 +539,8 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
         return self.returncode, None
 
     def poll_time_size(self, stream_type:str='video'):
+        """Both time and size are extracted from log, this is mainly used for null outputs, since file outputs can be directly checked
+        """
         self._refuse_null()
         chars = []
         Ffmpeg.log.debug(f'Started {self.p}')
@@ -541,72 +562,103 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
                         return self.returncode, Duration(t[1]), int(s[1]) * 1024
         return self.returncode, None, None
 
-    def poll_size(self, stream_type:str='video',size_allow:int=0, file_out:pathlib.Path=None):
+    def poll_limit_size_display_time(self, size_allow:int, file_out:pathlib.Path, progress_bar:ProgressBar):
+        """Polling time, and limiting the size, the size here is checked directly on the output file to save resource. Show the time on a progress bar
+        """
         self._refuse_null()
+        chars = []
         Ffmpeg.log.debug(f'Started {self.p}')
         while True:
             Checker.is_end(self.p)
             if file_out.stat().size() >= size_allow:
                 self.p.kill()
-                return None, True
-            char = self.p.stderr.read(100)
-            if char == b'':
+                inefficient = True
                 break
-        Ffmpeg.log.debug(f'Ended {self.p}')
-        self.returncode = self.p.wait()
-        return self.returncode, file_out.stat().size() >= size_allow
-
-    def poll_time_size_limit(self, stream_type:str, size_allow:int=0, file_out:pathlib.Path=None):
-        """Polling time and size information from a running ffmpeg subprocess.Popen
-
-        used in encoder (scope: child/encoder)
-        used in get_duration_and_size (wrapper)
-            used in stream_info (scope: main)
-            used in delta_adder (scope: child/encoder)
-            used in encoder (scope: child/encoder)
-
-        scope: main
-            End when KeyboardException is captured
-        scope: child
-            The EndExecution exception could be raised by check_end_kill, we pass it as is
-        """
-        self._refuse_null()
-        Ffmpeg.log.debug(f'Started {self.p}')
-        if size_allow is not None:
-            if file_out is None:
-                self.p.kill()
-                raise ValueError('No path given but trying to limit the file size')
-        chars = []
-        while True:
-            Checker.is_end(self.p)
-            if size_allow and file_out.stat().st_size >= size_allow:
-                self.p.kill()
-                return True
             char = self.p.stderr.read(100)
             if char == b'':
+                progress_bar.finish()
+                inefficient = False
                 break
             chars.append(char)
-        last, lines = Ffmpeg._log_cutter(chars)
-        if file_out is None:
-            s = Ffmpeg.reg_complete[stream_type].search(last)
-        else:
-            s = file_out.stat().st_size
-        t = size_allow is None
-        for line in reversed(lines): # This line has frame=xxx, fps=xxx, size=xxx
-            if s is None:
-                s = Ffmpeg.reg_running.search(line)
-            if t is None:
-                t = Ffmpeg.reg_time.search(line)
-            if s is not None and t is not None:
-                break
-        size = file_out.stat().st_size
-        if size_allow:
-            if size >= size_allow:
-                return True
-            else:
-                return False
+            t = Ffmpeg.reg_time.findall(b''.join(chars).decode('utf-8'))
+            if t:
+                complete = Duration(t[-1])
+                progress_bar.refresh(complete)
+                chars = []
         Ffmpeg.log.debug(f'Ended {self.p}')
-        return self.p.wait(), Duration(t), size
+        self.returncode = self.p.wait()
+        return self.returncode, inefficient
+
+    # The following method is never used, it is commented to save memory
+    # def poll_limit_size(self, stream_type:str='video',size_allow:int=0, file_out:pathlib.Path=None):
+    #     """Polling nothing, however limiting the output file size
+    #     """
+    #     self._refuse_null()
+    #     Ffmpeg.log.debug(f'Started {self.p}')
+    #     while True:
+    #         Checker.is_end(self.p)
+    #         if file_out.stat().size() >= size_allow:
+    #             self.p.kill()
+    #             return None, True
+    #         char = self.p.stderr.read(100)
+    #         if char == b'':
+    #             break
+    #     Ffmpeg.log.debug(f'Ended {self.p}')
+    #     self.returncode = self.p.wait()
+    #     return self.returncode, file_out.stat().size() >= size_allow
+
+    # The following method was written during the Non-OOP era, do not use it
+    # def _poll_time_size_limit(self, stream_type:str, size_allow:int=0, file_out:pathlib.Path=None):
+    #     """Polling time and size information from a running ffmpeg subprocess.Popen
+
+    #     used in encoder (scope: child/encoder)
+    #     used in get_duration_and_size (wrapper)
+    #         used in stream_info (scope: main)
+    #         used in delta_adder (scope: child/encoder)
+    #         used in encoder (scope: child/encoder)
+
+    #     scope: main
+    #         End when KeyboardException is captured
+    #     scope: child
+    #         The EndExecution exception could be raised by check_end_kill, we pass it as is
+    #     """
+    #     self._refuse_null()
+    #     Ffmpeg.log.debug(f'Started {self.p}')
+    #     if size_allow is not None:
+    #         if file_out is None:
+    #             self.p.kill()
+    #             raise ValueError('No path given but trying to limit the file size')
+    #     chars = []
+    #     while True:
+    #         Checker.is_end(self.p)
+    #         if size_allow and file_out.stat().st_size >= size_allow:
+    #             self.p.kill()
+    #             return True
+    #         char = self.p.stderr.read(100)
+    #         if char == b'':
+    #             break
+    #         chars.append(char)
+    #     last, lines = Ffmpeg._log_cutter(chars)
+    #     if file_out is None:
+    #         s = Ffmpeg.reg_complete[stream_type].search(last)
+    #     else:
+    #         s = file_out.stat().st_size
+    #     t = size_allow is None
+    #     for line in reversed(lines): # This line has frame=xxx, fps=xxx, size=xxx
+    #         if s is None:
+    #             s = Ffmpeg.reg_running.search(line)
+    #         if t is None:
+    #             t = Ffmpeg.reg_time.search(line)
+    #         if s is not None and t is not None:
+    #             break
+    #     size = file_out.stat().st_size
+    #     if size_allow:
+    #         if size >= size_allow:
+    #             return True
+    #         else:
+    #             return False
+    #     Ffmpeg.log.debug(f'Ended {self.p}')
+    #     return self.p.wait(), Duration(t), size
 
 
 class Video:
@@ -662,40 +714,70 @@ class Video:
         return len(self.audios)
 
     def start(self, dir_work_sub:pathlib.Path):
+        """Start the work on the video object, this includes:
+        Archive transcode
+            Video streams will be transocded to transparently compressed streams, saving space while keeping visual quality. 
+                By default this uses argument '-c:v libx264 -crf 18 -preset veryslow'
+            Audio streams will be transcoded to transparently compressed streams, saving space while keeping vocal quality. 
+                By default this uses argument '-c:a libopus -b:a 128000'
+            Other streams will be passed through
+            Metadata will be passed through
+
+            Addtionally, Any video/audio stream will be passed through if the output stream's size is greater than 0.9 * the size of hte orignal stream, this is checked repeatedly during the transcode any time after the output stream's duration is greater than 10 seconds.
+
+        Preview transcode
+            Video streams will be transcoded to heavily compressed streams, saving space with the sacrifice of visual quality, but the output stream is still distinguishable
+                By default this uses argument '-c:v libsvtav1 -crf 63 -preset 8'
+            Audio streams will be transcoded to heavily compressed streams, saving space with the sacrifice of vocal quality, but the output stream is still distinguishable
+                By default this uses argument '-c:a libopus -b:a 10000'
+            Other streams will be purged
+            Metadata will be purged
+
+        Screenshot
+            Each video stream will be taken a screenshot. Depending on the video stream duration, the output screenshot will be either a single frame from the middle of the video stream, or a L by L mosaic assembled by L^2 frames distributed homogeneous in the video stream. L is decided by the following calculation:
+                L = log( Video Duration [in second] / 2 + 1 )
+                L is then clamped to a value between 1 and 10, if L is 1 then single frame will be extracted, else the mosaic method will be used.
+
+            If a video file have multiple video streams, multiple screenshots will be saved in the same folder, the folder at the same level as other screenshots taken from video files with only one video stream.
+
+            Additionally, if Video Duration [in second] < L^2, the split frames will be extracted using filter:select method, where the video stream must be decoded as a whole; Else, the video stream will be seeked for L^2 times, each time at the exact frame, saving decoding resource.
+        """
         self.work = dir_work_sub  # The work dir is also used as a key
         self.archive = dir_archive / f'{self.name}.mkv'  # It's determined here so the output path can be updated before encoding
         self.preview = dir_preview / f'{self.name}.mkv'
-        self.key = Pool.add_threads()
-        streams_archive, streams_preview = ([] for i in range(2))
+        files_streams_archive, files_streams_preview, threads_archive, threads_preview, threads_screenshot, threads_muxer = ([] for i in range(6))  # Instead of arttribtues, threads and stream files are stored as throw-away lists, this is to avoid pickle refusing to save Thread/Lock objects.
         amix = len(self.audios) > 1
         work_archive = not self.archive.exists()
         work_preview = not self.preview.exists()
         for stream in self.streams:
             if stream is None:
                 if work_archive:
-                    streams_archive.append(None)
+                    files_streams_archive.append(None)
                 if work_preview:
-                    streams_preview.append(None)
+                    files_streams_preview.append(None)
             else:
                 if work_archive:
-                    streams_archive.append(stream.prepare('archive'))
-                if stream.type == 'video' or not amix and work_preview:
-                    streams_preview.append(stream.prepare('preview'))
+                    files_streams_archive, threads_archive = stream.prepare('archive', files_streams_archive, threads_archive)
+                if work_preview and (stream.type == 'video' or not amix):
+                    files_streams_preview, threads_preview = stream.prepare('preview', files_streams_preview, threads_preview)
         if amix and work_preview:
-            streams_preview.append(self.audios[0].prepare('preview', True))
+            files_streams_preview, threads_preview = self.audios[0].prepare('preview', files_streams_preview, threads_preview, True)
         if work_archive:
-            thread = threading.Thread(target=self.mux, args=('archive', streams_archive))
-            Pool.add_thread('muxer', self.key, thread)
+            thread = threading.Thread(target=self.mux, args=('archive', files_streams_archive, threads_archive))
+            threads_muxer.append(thread)
+            thread.start()
             log_main.debug(f'Spawned thread {thread}')
         if work_preview:
-            thread = threading.Thread(target=self.mux, args=('preview', streams_preview))
-            Pool.add_thread('muxer', self.key, thread)
+            thread = threading.Thread(target=self.mux, args=('preview', files_streams_preview, threads_preview))
+            threads_muxer.append(thread)
+            thread.start()
             log_main.debug(f'Spawned thread {thread}')
         if len(self.videos) == 1:
             file_screenshot = dir_screenshot / f'{self.name}.jpg'
             if not file_screenshot.exists():
                 thread = threading.Thread(target=self.videos[0].screenshot)
-                Pool.add_thread('screenshot', self.key, thread)
+                threads_screenshot.append(thread)
+                thread.start()
                 log_main.debug(f'Spawned thread {thread}')
         else:
             dir_screenshot_sub = dir_screenshot / self.name
@@ -705,32 +787,40 @@ class Video:
                 file_screenshot = dir_screenshot_sub / f'{self.name}_{stream.id}.jpg'
                 if not file_screenshot.exists():
                     thread = threading.Thread(target=stream.screenshot, args=(dir_screenshot_sub, ))
-                    Pool.add_thread('screenshot', self.key, thread)
+                    threads_screenshot.append(thread)
+                    thread.start()
                     log_main.debug(f'Spawned thread {thread}')
-        thread = threading.Thread(target=self.clean)
+        thread = threading.Thread(target=self.clean, args=(threads_muxer + threads_screenshot, ))
         thread.start()
         log_main.debug(f'Spawned thread {thread}')
         Pool.add_work(self.raw)
 
-    def mux(self, encode_type:str, streams: list):
+    def mux(self, encode_type:str, files_streams: list, threads: list) :
         log = LoggingWrapper(f'[{self.name}] M:{encode_type.capitalize()[:1]}')
         try:
-            for thread in Pool.get_threads(encode_type, self.key):
+            for thread in threads:
                 Checker.join(thread)
-            inputs = ['-i', self.raw]
-            input_id = 0
+            archive = encode_type == 'archive'
+            if archive:
+                inputs = ['-i', self.raw]
+                input_id = 0
+                metadata = '0'
+            else:
+                inputs = []
+                input_id = -1
+                metadata = '-1'
             mappers = []
-            for stream_id, stream in enumerate(streams):
+            for stream_id, file_stream in enumerate(files_streams):
                 Checker.is_end()
-                if stream is None:
+                if archive and file_stream is None:
                     mappers += ['-map', f'0:{stream_id}']
                 else:
-                    inputs += ['-i', stream]
+                    inputs += ['-i', file_stream]
                     input_id += 1
                     mappers += ['-map', f'{input_id}']
             log.info(f'Muxing to {self.archive}...')
             file_work = self.work / f'{self.name}_{encode_type}.mkv'
-            args = (*inputs, '-c', 'copy', *mappers, '-map_metadata', '0', '-y', file_work)
+            args = (*inputs, '-c', 'copy', *mappers, '-map_metadata', metadata, '-y', file_work)
             while Ffmpeg(args, null=True).poll_dumb():
                 Checker.is_end()
                 log.warning(f'Muxing failed, retry that later')
@@ -746,7 +836,7 @@ class Video:
         log.info(f'Muxed to {file_out}')
 
 
-    def clean(self):
+    def clean(self, threads):
         """Cleaning the work directory and the raw file
 
         cleaner itself (scope: child/cleaner)
@@ -761,9 +851,7 @@ class Video:
         """
         log = LoggingWrapper(f'[{self.name}] CLR')
         try:
-            for thread in Pool.get_threads('muxer', self.key):
-                Checker.join(thread)
-            for thread in Pool.get_threads('screenshot', self.key):
+            for thread in threads:
                 Checker.join(thread)
             log.info(f'Cleaning input and {self.work}...')
             shutil.rmtree(self.work)
@@ -827,7 +915,7 @@ class Stream:
             else:
                 self.rotation = None
 
-    def __copy(self, log:LoggingWrapper, prefix:str, file_out:pathlib.Path, file_done:pathlib.Path):
+    def _copy(self, log:LoggingWrapper, prefix:str, file_out:pathlib.Path, file_done:pathlib.Path):
         log.info('Transcode inefficient, copying raw stream instead')
         file_copy = self.parent.work / f'{prefix}_copy.nut'
         args = ('-i', self.parent.path, '-c', 'copy', '-map', f'0:{self.id}', '-y', file_copy)
@@ -839,7 +927,7 @@ class Stream:
         log.info('Stream copy done')
         file_done.touch()
 
-    def __concat(self, log:LoggingWrapper, prefix:str, concat_list:list, file_out:pathlib.Path, file_done:pathlib.Path):
+    def _concat(self, log:LoggingWrapper, prefix:str, concat_list:list, file_out:pathlib.Path, file_done:pathlib.Path):
         log.info('Transcode done, concating all parts')
         file_list = self.parent.work / f'{prefix}.list'
         file_concat = self.parent.work / f'{prefix}_concat.nut'
@@ -856,22 +944,24 @@ class Stream:
         log.info('Concating done')
         file_done.touch()
 
-    def prepare(self, encode_type:str, amix:bool=False):
+    def prepare(self, encode_type:str, files_stream:list=None, threads:list=None, amix:bool=False):
         if amix:
             file_out = self.parent.work / f'{self.parent.name}_preview_amix.nut'
             file_done = self.parent.work / f'{self.parent.name}_preview_amix.done'
         else:
             file_out = self.parent.work / f'{self.parent.name}_archive_{self.id}_{self.type}.nut'
             file_done = self.parent.work / f'{self.parent.name}_archive_{self.id}_{self.type}.done'
+        files_stream.append(file_out)
         if file_done.exists():
             if file_out.exists():
-                return file_out
+                return files_stream, threads
             else:
                 file_done.unlink()
         thread = threading.Thread(target=self.encode, args=(encode_type, file_out, file_done, amix))
-        Pool.add_thread(encode_type, self.parent.key, thread)
+        threads.append(thread)
+        thread.start()
         log_main.debug(f'Spawned thread {thread}')
-        return file_out
+        return files_stream, threads
 
     def encode(self, encode_type:str, file_out:pathlib.Path, file_done:pathlib.Path, amix:bool=False):
         """Encoding certain stream in a media file
@@ -973,7 +1063,10 @@ class Stream:
                                     break
                         with Checker.context(open(file_concat_pickle, 'wb')) as f:
                             pickle.dump((concat_list, start, size_exist), f)
-                file_out.unlink()      
+                try:
+                    file_out.unlink()      
+                except FileNotFoundError:
+                    pass
             # Check if recovered last time
             if not concat_list and file_concat_pickle.exists():
                 with file_concat_pickle.open('rb') as f:
@@ -982,10 +1075,10 @@ class Stream:
             if concat_list:
                 # We've already transcoded this
                 if check_efficiency and size_exist > self.size * 0.9:
-                    self.__copy(log, prefix, file_out, file_done)
+                    self._copy(log, prefix, file_out, file_done)
                     return 
                 if start >= self.duration or self.duration - start < 1:
-                    self.__concat(log, prefix, concat_list, file_out, file_done)
+                    self._concat(log, prefix, concat_list, file_out, file_done)
                     return
             # Real encoding happenes below
             if check_efficiency:
@@ -1018,17 +1111,18 @@ class Stream:
                 if self.type == 'video':
                     Pool.wait(log, encode_type)
                 p = Ffmpeg(args)
+                progress_bar = ProgressBar(log, self.duration)
                 if check_efficiency:
-                    r, inefficient = p.poll_size(self.type, size_allow, file_out)
+                    r, inefficient = p.poll_limit_size_display_time(size_allow, file_out, progress_bar)
                     if inefficient:
-                        self.__copy(log, prefix, file_out, file_done)
+                        self._copy(log, prefix, file_out, file_done)
                         return
                 else:
-                    p.poll_dumb()
+                    p.poll_dumb_display_time(progress_bar)
                 if p.returncode == 0:
                     if concat_list:
                         concat_list.append(file_out.name)
-                        self.__concat(log, prefix, concat_list, file_out, file_done)
+                        self._concat(log, prefix, concat_list, file_out, file_done)
                     else:
                         log.info('Transcode done')
                         file_done.touch()
@@ -1088,7 +1182,7 @@ class Stream:
             time_delta = self.duration / tiles
             if self.duration < tiles:
                 args = (
-                    '-i', self.parent.raw, '-map', f'0:{self.id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta.seconds()}),tile={length}x{length}{arg_scale}', *args_out
+                    '-i', self.parent.raw, '-map', f'0:{self.id}', '-filter:v', f'select=eq(n\,0)+gte(t-prev_selected_t\,{time_delta}),tile={length}x{length}{arg_scale}', *args_out
                 )
             else:
                 time_start = Duration(0)
@@ -1363,39 +1457,39 @@ class Pool:
                 return True
         return False
 
-    @classmethod
-    def add_threads(cls):
-        cls._threads_archive.append([])
-        cls._threads_preview.append([])
-        cls._threads_muxer.append([])
-        cls._threads_screenshot.append([])
-        cls._threads_id += 1
-        return cls._threads_id
+    # @classmethod
+    # def add_threads(cls):
+    #     cls._threads_archive.append([])
+    #     cls._threads_preview.append([])
+    #     cls._threads_muxer.append([])
+    #     cls._threads_screenshot.append([])
+    #     cls._threads_id += 1
+    #     return cls._threads_id
 
-    @classmethod
-    def add_thread(cls, pool, threads_id, thread):
-        match pool:
-            case 'archive':
-                cls._threads_archive[threads_id].append(thread)
-            case 'preview':
-                cls._threads_preview[threads_id].append(thread)
-            case 'muxer':
-                cls._threads_muxer[threads_id].append(thread)
-            case 'screenshot':
-                cls._threads_screenshot[threads_id].append(thread)
-        thread.start()
+    # @classmethod
+    # def add_thread(cls, pool, threads_id, thread):
+    #     match pool:
+    #         case 'archive':
+    #             cls._threads_archive[threads_id].append(thread)
+    #         case 'preview':
+    #             cls._threads_preview[threads_id].append(thread)
+    #         case 'muxer':
+    #             cls._threads_muxer[threads_id].append(thread)
+    #         case 'screenshot':
+    #             cls._threads_screenshot[threads_id].append(thread)
+    #     thread.start()
 
-    @classmethod
-    def get_threads(cls, pool, threads_id):
-        match pool:
-            case 'archive':
-                return cls._threads_archive[threads_id]
-            case 'preview':
-                return cls._threads_preview[threads_id]
-            case 'muxer':
-                return cls._threads_muxer[threads_id]
-            case 'screenshot':
-                return cls._threads_preview[threads_id]
+    # @classmethod
+    # def get_threads(cls, pool, threads_id):
+    #     match pool:
+    #         case 'archive':
+    #             return cls._threads_archive[threads_id]
+    #         case 'preview':
+    #             return cls._threads_preview[threads_id]
+    #         case 'muxer':
+    #             return cls._threads_muxer[threads_id]
+    #         case 'screenshot':
+    #             return cls._threads_preview[threads_id]
 
     @classmethod
     def scheduler(cls):
