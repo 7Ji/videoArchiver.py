@@ -5,7 +5,6 @@ import json
 import re
 import pathlib
 import shutil
-from numpy import isin
 import psutil
 import time
 import pickle
@@ -495,7 +494,7 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
 
     def _refuse_null(self):
         if self.null:
-            self.p.kill()
+            self.p.terminate()
             raise ValueError('Polling from void')
 
     def poll_dumb_display_time(self, progress_bar:ProgressBar):
@@ -571,7 +570,7 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
         while True:
             Checker.is_end(self.p)
             if file_out.stat().size() >= size_allow:
-                self.p.kill()
+                self.p.terminate()
                 inefficient = True
                 break
             char = self.p.stderr.read(100)
@@ -598,7 +597,7 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
     #     while True:
     #         Checker.is_end(self.p)
     #         if file_out.stat().size() >= size_allow:
-    #             self.p.kill()
+    #             self.p.terminate()
     #             return None, True
     #         char = self.p.stderr.read(100)
     #         if char == b'':
@@ -626,13 +625,13 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
     #     Ffmpeg.log.debug(f'Started {self.p}')
     #     if size_allow is not None:
     #         if file_out is None:
-    #             self.p.kill()
+    #             self.p.terminate()
     #             raise ValueError('No path given but trying to limit the file size')
     #     chars = []
     #     while True:
     #         Checker.is_end(self.p)
     #         if size_allow and file_out.stat().st_size >= size_allow:
-    #             self.p.kill()
+    #             self.p.terminate()
     #             return True
     #         char = self.p.stderr.read(100)
     #         if char == b'':
@@ -1226,7 +1225,7 @@ class Checker:
     def is_end(cls, p:subprocess.Popen=None):
         if cls.end_flag:
             if p is not None:
-                p.kill()
+                p.terminate()
             raise EndExecution
 
     @classmethod

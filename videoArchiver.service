@@ -1,0 +1,14 @@
+[Unit]
+Description=Archiving video files
+After=srv-netshare.mount
+
+[Service]
+Type=simple
+User=netshare
+
+WorkingDirectory=/srv/netshare/transcode
+KillSignal=SIGINT
+ExecStart=/usr/bin/python -u /srv/netshare/transcode/videoArchiver.py
+
+[Install]
+WantedBy=multi-user.target
