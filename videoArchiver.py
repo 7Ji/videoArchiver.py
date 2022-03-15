@@ -11,6 +11,7 @@ import pickle
 import math
 import logging
 import contextlib
+import sys
 
 
 class EndExecution(RuntimeError):
@@ -26,27 +27,35 @@ class CleanPrinter:
 
     bars = 0
     lock_bar = threading.Lock()
-    width = shutil.get_terminal_size()[0]
-
-    @classmethod
-    def check_terminal(cls):
-        width = shutil.get_terminal_size()[0]
-        if width == cls.width:
+    is_tty = sys.stdout.isatty()
+    width = shutil.get_terminal_size()[0] if is_tty else None
+    
+    @staticmethod
+    def check_terminal():
+        if CleanPrinter.is_tty:
+            width = shutil.get_terminal_size()[0]
+            if width == CleanPrinter.width:
+                return False
+            CleanPrinter.width = width
+            return True
+        else:
             return False
-        cls.width = width
-        return True
 
-    @classmethod
-    def clear_line(cls):
+
+    @staticmethod
+    def clear_line():
         """Always clean the line before printing, this is to avoid the unfinished progress bar being stuck on the screen
         """
-        print(' ' * cls.width, end='\r')
+        if CleanPrinter.is_tty:
+            print(' ' * CleanPrinter.width, end='\r')
+        return
 
-    @classmethod
-    def print(cls, content, loglevel=logging.INFO, end=None):
-        cls.check_terminal()
-        if cls.bars: # Only clear line if there are progress bars being displayed
-            cls.clear_line()
+    @staticmethod
+    def print(content, loglevel=logging.INFO, end=None):
+        if CleanPrinter.is_tty:
+            CleanPrinter.check_terminal()
+            if CleanPrinter.bars: # Only clear line if there are progress bars being displayed
+                CleanPrinter.clear_line()
         if end is None:
             print(content)
         else:
@@ -141,8 +150,6 @@ class Duration:
         return self.time != 0
 
     def __str__(self):
-        # hours, remainder = divmod(self.time, 3600)
-        # minutes, seconds = divmod(remainder, 60)
         return str(self.time)
 
     def __int__(self):
@@ -321,17 +328,18 @@ class ProgressBar:
     """
     invalid_time = '--:--:--'
     def __init__(self, log: LoggingWrapper, duration:Duration):
-        with CleanPrinter.lock_bar:
-            CleanPrinter.bars += 1
-        self._log = log
-        self._complete = Duration()
-        self._duration = duration
-        self._title_length = len(log.title)
-        self._bar_complete = -1
-        self._time_start = time.time()
-        self._time_spent = Duration()
-        log.debug('Encoder started')
-        self._display(True)
+        if CleanPrinter.is_tty:
+            with CleanPrinter.lock_bar:
+                CleanPrinter.bars += 1
+            self._log = log
+            self._complete = Duration()
+            self._duration = duration
+            self._title_length = len(log.title)
+            self._bar_complete = -1
+            self._time_start = time.time()
+            self._time_spent = Duration()
+            log.debug('Encoder started')
+            self._display(True)
 
 
     def _display(self, update=False):
@@ -387,31 +395,16 @@ class ProgressBar:
 
     def refresh(self, complete:Duration):
         self._log.debug(f'Encoded {complete} / {self._duration} seconds')
-        if complete - self._complete > 1:
+        if CleanPrinter.is_tty and complete - self._complete > 1:
             self._complete = complete
             self._display()
 
     def finish(self):
-        CleanPrinter.clear_line()
-        with Checker.context(CleanPrinter.lock_bar):
-            CleanPrinter.bars -= 1
+        if CleanPrinter.is_tty:
+            CleanPrinter.clear_line()
+            with Checker.context(CleanPrinter.lock_bar):
+                CleanPrinter.bars -= 1
         self._log.debug('Encoder exited')
-
-    # def set(self, percent):
-    #     if percent != self._percent:
-    #         self._percent = clamp(percent, 0, 1)
-    #     self._log.debug(f'Encoding at {self._percent:%}')
-    #     self._display()
-
-    # def set_fraction(self, numerator, denominator):
-    #     if type(numerator) == type(denominator):
-    #         percent = numerator / denominator
-    #         if percent != self._percent:
-    #             self._percent = clamp(percent, 0, 1)
-    #         self._log.debug(f'Encoding {numerator}/{denominator} at {self._percent:%}')
-    #     else:
-    #         self._log.debug(f'Encoding at {self._percent:%}')
-    #     self._display()
 
 
 class Ffprobe:
@@ -588,77 +581,6 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
         self.returncode = self.p.wait()
         return self.returncode, inefficient
 
-    # The following method is never used, it is commented to save memory
-    # def poll_limit_size(self, stream_type:str='video',size_allow:int=0, file_out:pathlib.Path=None):
-    #     """Polling nothing, however limiting the output file size
-    #     """
-    #     self._refuse_null()
-    #     Ffmpeg.log.debug(f'Started {self.p}')
-    #     while True:
-    #         Checker.is_end(self.p)
-    #         if file_out.stat().size() >= size_allow:
-    #             self.p.terminate()
-    #             return None, True
-    #         char = self.p.stderr.read(100)
-    #         if char == b'':
-    #             break
-    #     Ffmpeg.log.debug(f'Ended {self.p}')
-    #     self.returncode = self.p.wait()
-    #     return self.returncode, file_out.stat().size() >= size_allow
-
-    # The following method was written during the Non-OOP era, do not use it
-    # def _poll_time_size_limit(self, stream_type:str, size_allow:int=0, file_out:pathlib.Path=None):
-    #     """Polling time and size information from a running ffmpeg subprocess.Popen
-
-    #     used in encoder (scope: child/encoder)
-    #     used in get_duration_and_size (wrapper)
-    #         used in stream_info (scope: main)
-    #         used in delta_adder (scope: child/encoder)
-    #         used in encoder (scope: child/encoder)
-
-    #     scope: main
-    #         End when KeyboardException is captured
-    #     scope: child
-    #         The EndExecution exception could be raised by check_end_kill, we pass it as is
-    #     """
-    #     self._refuse_null()
-    #     Ffmpeg.log.debug(f'Started {self.p}')
-    #     if size_allow is not None:
-    #         if file_out is None:
-    #             self.p.terminate()
-    #             raise ValueError('No path given but trying to limit the file size')
-    #     chars = []
-    #     while True:
-    #         Checker.is_end(self.p)
-    #         if size_allow and file_out.stat().st_size >= size_allow:
-    #             self.p.terminate()
-    #             return True
-    #         char = self.p.stderr.read(100)
-    #         if char == b'':
-    #             break
-    #         chars.append(char)
-    #     last, lines = Ffmpeg._log_cutter(chars)
-    #     if file_out is None:
-    #         s = Ffmpeg.reg_complete[stream_type].search(last)
-    #     else:
-    #         s = file_out.stat().st_size
-    #     t = size_allow is None
-    #     for line in reversed(lines): # This line has frame=xxx, fps=xxx, size=xxx
-    #         if s is None:
-    #             s = Ffmpeg.reg_running.search(line)
-    #         if t is None:
-    #             t = Ffmpeg.reg_time.search(line)
-    #         if s is not None and t is not None:
-    #             break
-    #     size = file_out.stat().st_size
-    #     if size_allow:
-    #         if size >= size_allow:
-    #             return True
-    #         else:
-    #             return False
-    #     Ffmpeg.log.debug(f'Ended {self.p}')
-    #     return self.p.wait(), Duration(t), size
-
 
 class Video:
     def __init__(self, path:pathlib.Path):
@@ -675,7 +597,6 @@ class Video:
                 for stream_id, stream in enumerate(
                     json.loads(Ffprobe(('-show_streams', '-of', 'json', path)).stdout)['streams']
                 ):
-                    #log_scanner.info(f'Getting stream information for stream {stream_id} from {i}')
                     stream_type = stream['codec_type'] 
                     if stream_type in ('video', 'audio'):
                         stream_duration, stream_size = Stream.get_duration_and_size(path, stream_id, stream_type)
@@ -834,20 +755,7 @@ class Video:
         shutil.move(file_work, file_out)
         log.info(f'Muxed to {file_out}')
 
-
     def clean(self, threads):
-        """Cleaning the work directory and the raw file
-
-        cleaner itself (scope: child/cleaner)
-
-        scope: child-main
-            As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
-                join
-                check_end
-                db_write
-
-            Should that, or the end_work flag be captured, return to end this thread
-        """
         log = LoggingWrapper(f'[{self.name}] CLR')
         try:
             for thread in threads:
@@ -881,17 +789,6 @@ class Stream:
 
     @staticmethod
     def get_duration_and_size(path: pathlib.Path, stream_id: int=0, stream_type: int=0):
-        """Get duration and size from a stream from a media file, just a wrapper, 
-
-        used in stream_info (scope: main)
-        used in delta_adder (scope: child/encoder)
-        used in encoder (scope: child/encoder)
-
-        scope: main
-            End when KeyboardException is captured
-        scope: child
-            The EndExecution exception could be raised by ffmpeg_time_size_poller, we pass it as is
-        """
         for _ in range(3):
             r, t, s = Ffmpeg(('-i', path, '-c', 'copy', '-map', f'0:{stream_id}', '-f', 'null', '-'), ).poll_time_size(stream_type)
             if r == 0:
@@ -963,22 +860,6 @@ class Stream:
         return files_stream, threads
 
     def encode(self, encode_type:str, file_out:pathlib.Path, file_done:pathlib.Path, amix:bool=False):
-        """Encoding certain stream in a media file
-
-        encoder itself (scope: child/encoder)
-
-        scope: child-main
-            As the invoker of other child functions, EndExecution exception raised by child functions will be captured here:
-                get_duration_and_size
-                delta_adder
-                ffmpeg_dumb_poller
-                ffmpeg_time_size_poller
-                stream_copy
-                concat
-                wait_cpu
-
-            Should that, return to end this thread
-        """
         if amix:
             log = LoggingWrapper(f'[{self.parent.name}] E:P S:Amix')
             prefix = f'{self.parent.name}_preview_audio'
@@ -1221,15 +1102,15 @@ class Stream:
 
 class Checker:
     end_flag = False
-    @classmethod
-    def is_end(cls, p:subprocess.Popen=None):
-        if cls.end_flag:
+    @staticmethod
+    def is_end(p:subprocess.Popen=None):
+        if Checker.end_flag:
             if p is not None:
                 p.terminate()
             raise EndExecution
 
-    @classmethod
-    def join(cls, thread: threading.Thread):
+    @staticmethod
+    def join(thread: threading.Thread):
         """Cleanly join a thread, just an invoker so that the work_end flag can be captured
 
         used in muxer (scope: child/muxer)
@@ -1238,20 +1119,20 @@ class Checker:
         scope: child
             The EndExecution flag could be raised by check_end, we pass it as is
         """
-        if cls.end_flag:
+        if Checker.end_flag:
             raise EndExecution
         thread.join()
-        if cls.end_flag:
+        if Checker.end_flag:
             raise EndExecution
 
-    @classmethod
-    def end(cls):
-        cls.end_flag = True
+    @staticmethod
+    def end():
+        Checker.end_flag = True
 
-    @classmethod
-    def sleep(cls, t:int=5):
+    @staticmethod
+    def sleep(t:int=5):
         while t:
-            cls.is_end()
+            Checker.is_end()
             time.sleep(1)
             t -= 1
 
@@ -1389,28 +1270,28 @@ class Pool:
     _log = LoggingWrapper('[Scheduler]')
     _event_scheduler = threading.Event()
 
-    @classmethod
-    def wake(cls):
-        cls._event_scheduler.set()
+    @staticmethod
+    def wake():
+        Pool._event_scheduler.set()
 
-    @classmethod
-    def _update_cpu_percent(cls):
-        cls._cpu_percent = psutil.cpu_percent()
-        cls._log.debug(f'CPU usage: {cls._cpu_percent}')
+    @staticmethod
+    def _update_cpu_percent():
+        Pool._cpu_percent = psutil.cpu_percent()
+        Pool._log.debug(f'CPU usage: {Pool._cpu_percent}')
 
-    @classmethod
-    def _waker(cls, pool, lock, cpu_need, prompt):
-        while cls._cpu_percent < cpu_need and pool:
+    @staticmethod
+    def _waker(pool, lock, cpu_need, prompt):
+        while Pool._cpu_percent < cpu_need and pool:
             Checker.is_end()
             with lock:
                 Checker.is_end()
                 pool.pop(0).set()
-                cls._log.info(prompt)
+                Pool._log.info(prompt)
             Checker.sleep(5)
-            cls._update_cpu_percent()
+            Pool._update_cpu_percent()
 
-    @classmethod
-    def wait(cls, log, style):
+    @staticmethod
+    def wait(log, style):
         """Wait for CPU resource,
 
         used in encoder (scope: child/encoder)
@@ -1421,100 +1302,66 @@ class Pool:
         """
         match style:
             case '264' | 'archive':
-                lock = cls._lock_264
-                pool = cls._pool_264
+                lock = Pool._lock_264
+                pool = Pool._pool_264
             case 'av1' | 'preview':
-                lock = cls._lock_av1
-                pool = cls._pool_av1
+                lock = Pool._lock_av1
+                pool = Pool._pool_av1
             case 'ss' | 'screenshot':
-                lock = cls._lock_ss
-                pool = cls._pool_ss
+                lock = Pool._lock_ss
+                pool = Pool._pool_ss
         log.info('Waiting for CPU resources')
         waiter = threading.Event()
         log.debug(f'Waiting for {waiter} to be set')
         with Checker.context(lock):
             pool.append(waiter)
-        cls._event_scheduler.set()
+        Pool._event_scheduler.set()
         waiter.wait()
         Checker.is_end()
         log.info('Waked up')
 
-    @classmethod
-    def add_work(cls, entry):
-        with Checker.context(cls._lock_work):
-            cls._pool_work.append(entry)
+    @staticmethod
+    def add_work(entry):
+        with Checker.context(Pool._lock_work):
+            Pool._pool_work.append(entry)
 
-    @classmethod
-    def remove_work(cls, entry):
-        with Checker.context(cls._lock_work):
-            cls._pool_work.remove(entry)
+    @staticmethod
+    def remove_work(entry):
+        with Checker.context(Pool._lock_work):
+            Pool._pool_work.remove(entry)
 
-    @classmethod
-    def query_work(cls, entry):
-        with Checker.context(cls._lock_work):
-            if entry in cls._pool_work:
+    @staticmethod
+    def query_work(entry):
+        with Checker.context(Pool._lock_work):
+            if entry in Pool._pool_work:
                 return True
         return False
 
-    # @classmethod
-    # def add_threads(cls):
-    #     cls._threads_archive.append([])
-    #     cls._threads_preview.append([])
-    #     cls._threads_muxer.append([])
-    #     cls._threads_screenshot.append([])
-    #     cls._threads_id += 1
-    #     return cls._threads_id
-
-    # @classmethod
-    # def add_thread(cls, pool, threads_id, thread):
-    #     match pool:
-    #         case 'archive':
-    #             cls._threads_archive[threads_id].append(thread)
-    #         case 'preview':
-    #             cls._threads_preview[threads_id].append(thread)
-    #         case 'muxer':
-    #             cls._threads_muxer[threads_id].append(thread)
-    #         case 'screenshot':
-    #             cls._threads_screenshot[threads_id].append(thread)
-    #     thread.start()
-
-    # @classmethod
-    # def get_threads(cls, pool, threads_id):
-    #     match pool:
-    #         case 'archive':
-    #             return cls._threads_archive[threads_id]
-    #         case 'preview':
-    #             return cls._threads_preview[threads_id]
-    #         case 'muxer':
-    #             return cls._threads_muxer[threads_id]
-    #         case 'screenshot':
-    #             return cls._threads_preview[threads_id]
-
-    @classmethod
-    def scheduler(cls):
-        cls._log.info('Started')
+    @staticmethod
+    def scheduler():
+        Pool._log.info('Started')
         while not work_end:
             try:
-                with Checker.context(cls._lock_264), Checker.context(cls._lock_av1), Checker.context(cls._lock_ss):
-                    if not cls._pool_264 and not cls._pool_av1 and not cls._pool_ss:
-                        cls._event_scheduler.clear()
+                with Checker.context(Pool._lock_264), Checker.context(Pool._lock_av1), Checker.context(Pool._lock_ss):
+                    if not Pool._pool_264 and not Pool._pool_av1 and not Pool._pool_ss:
+                        Pool._event_scheduler.clear()
                 Checker.is_end()
-                cls._event_scheduler.wait()
+                Pool._event_scheduler.wait()
                 Checker.is_end()
                 Checker.sleep(5)
-                cls._update_cpu_percent()
-                cls._waker(cls._pool_264, cls._lock_264, cls._cpu_264, cls._prompt_264)
-                cls._waker(cls._pool_av1, cls._lock_av1, cls._cpu_av1, cls._prompt_av1)
-                cls._waker(cls._pool_ss, cls._lock_ss, cls._cpu_ss, cls._prompt_ss)
+                Pool._update_cpu_percent()
+                Pool._waker(Pool._pool_264, Pool._lock_264, Pool._cpu_264, Pool._prompt_264)
+                Pool._waker(Pool._pool_av1, Pool._lock_av1, Pool._cpu_av1, Pool._prompt_av1)
+                Pool._waker(Pool._pool_ss, Pool._lock_ss, Pool._cpu_ss, Pool._prompt_ss)
             except EndExecution:
                 break
-        cls._log.warning('Terminating, waking up all sleeping threads so they can end themselvies')
-        for waitpool in cls._pool_264, cls._pool_av1, cls._pool_ss:
+        Pool._log.warning('Terminating, waking up all sleeping threads so they can end themselvies')
+        for waitpool in Pool._pool_264, Pool._pool_av1, Pool._pool_ss:
             while waitpool:
                 waiter = waitpool.pop(0)
                 waiter.set()
-                cls._log.debug(f'Emergency wakeup: {waiter}')
-        cls._log.debug(f'Ending thread {threading.current_thread()}')
+                Pool._log.debug(f'Emergency wakeup: {waiter}')
+        Pool._log.debug(f'Ending thread {threading.current_thread()}')
 
 
 def wait_close(file_raw:pathlib.Path):
