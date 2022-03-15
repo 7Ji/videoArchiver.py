@@ -328,12 +328,12 @@ class ProgressBar:
     """
     invalid_time = '--:--:--'
     def __init__(self, log: LoggingWrapper, duration:Duration):
+        self._log = log
+        self._duration = duration
         if CleanPrinter.is_tty:
             with CleanPrinter.lock_bar:
                 CleanPrinter.bars += 1
-            self._log = log
             self._complete = Duration()
-            self._duration = duration
             self._title_length = len(log.title)
             self._bar_complete = -1
             self._time_start = time.time()
