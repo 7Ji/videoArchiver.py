@@ -851,8 +851,8 @@ class Stream:
             file_out = self.parent.work / f'{self.parent.name}_preview_amix.nut'
             file_done = self.parent.work / f'{self.parent.name}_preview_amix.done'
         else:
-            file_out = self.parent.work / f'{self.parent.name}_archive_{self.id}_{self.type}.nut'
-            file_done = self.parent.work / f'{self.parent.name}_archive_{self.id}_{self.type}.done'
+            file_out = self.parent.work / f'{self.parent.name}_{encode_type}_{self.id}_{self.type}.nut'
+            file_done = self.parent.work / f'{self.parent.name}_{encode_type}_{self.id}_{self.type}.done'
         files_stream.append(file_out)
         if file_done.exists():
             if file_out.exists():
@@ -949,9 +949,13 @@ class Stream:
                                     break
                         with Checker.context(open(file_concat_pickle, 'wb')) as f:
                             pickle.dump((concat_list, start, size_exist), f)
+                    else:
+                        log.info('Recovery not possible, last interrupt transcode is abandoned')
                 try:
                     file_out.unlink()      
                 except FileNotFoundError:
+                    pass
+                except PermissionError:
                     pass
             # Check if recovered last time
             if not concat_list and file_concat_pickle.exists():
@@ -1156,8 +1160,8 @@ class Database:
 
     def __init__(self, backend, dir_raw, dir_archive, dir_preview, dir_screenshot):
         self._lock = threading.Lock()
-        self._log_db = LoggingWrapper('[Database] DB')
-        self._log_scan = LoggingWrapper('[Database] SC')
+        self._log_db = LoggingWrapper('[Database]')
+        self._log_scan = LoggingWrapper('[Scanner]')
         self._backend = backend
         self._raw = dir_raw
         self._archive = dir_archive
