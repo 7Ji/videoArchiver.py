@@ -490,7 +490,7 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
 
     def _refuse_null(self):
         if self.null:
-            self.p.terminate()
+            self.p.kill()
             raise ValueError('Polling from void')
 
     def poll_dumb_display_time(self, progress_bar:ProgressBar):
@@ -576,7 +576,7 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
                 complete = Duration(t[-1])
                 percent = progress_bar.refresh(complete)
                 if complete > 10 and file_out.stat().st_size >= size_allow * percent:
-                    self.p.terminate()
+                    self.p.kill()
                     inefficient = True
                     break
                 chars = []
@@ -1055,8 +1055,8 @@ class Stream:
         else:
             log = LoggingWrapper(f'[{self.parent.name}] S:{self.id}')
             if self.rotation in (90, -90):
-                stream_width = self.width
-                stream_height = self.height
+                stream_width = self.height
+                stream_height = self.width
             else:
                 stream_width = self.width
                 stream_height = self.height
@@ -1118,7 +1118,7 @@ class Checker:
     def is_end(p:subprocess.Popen=None):
         if Checker.end_flag:
             if p is not None:
-                p.terminate()
+                p.kill()
             raise EndExecution
 
     @staticmethod
