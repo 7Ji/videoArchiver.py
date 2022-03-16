@@ -32,8 +32,6 @@
     - When tiles <= video duration, tiles times seekings will happen, each directly seek at the time the wanted frame is shown, this way the video is decoded tile times, but saves resource used for decoding.
 - [X] **Multithreading**. Any encoding, muxing, screenshooting and scheduling happenes in their dedicated threads. It's basicly files X streams X 3 level multithreading
     - Different from av1an, a stream itself is not multithreaded, this is to prevent space waste on unneccessary I-frames
-    - The scan routine, however, happenes in the main thread, so if you start videoArchiver with an empty database and tons of video files to scan, the first transcode could start late. If you want videoArchiver.py to start fast, you could drop in just some files to make sure the transcode work starts, then add remaining files.
-    - A rewrite of the current scan routine could prevent this, but I'm not interested in this. A couple seconds for scanning is nothing compared to hours to transcoding.
 - [X] **Database (not fully)** All videos and their information will be stored in database, so if you interrupt the videoArchiver.py, the next time you start it, it still remembers the videos it have scanned before. 
     - This currently is achived via pickle, and only remember a certain video until all the archive/preview/screenshot work is done to save memory/disk usage.
     - A rewrite of the database routine is under going, sqlite might be a replacement
