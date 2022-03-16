@@ -327,13 +327,13 @@ class ProgressBar:
     """Progress bar with title, percent, spent/estimate time
     """
     invalid_time = '--:--:--'
-    def __init__(self, log: LoggingWrapper, duration:Duration):
+    def __init__(self, log: LoggingWrapper, duration:Duration, complete:Duration=Duration()):
         self._log = log
         self._duration = duration
         if CleanPrinter.is_tty:
             with CleanPrinter.lock_bar:
                 CleanPrinter.bars += 1
-            self._complete = Duration()
+            self._complete = complete
             self._title_length = len(log.title)
             self._percent = 0
             self._bar_complete = -1
@@ -996,13 +996,14 @@ class Stream:
                     args_codec = Ffmpeg.args_audio_preview
                     args_filter = '-filter_complex', f'amix=inputs={self.parent.get_audio_count()}:duration=longest'
             args = '-ss', str(start), '-i', self.parent.raw, *args_codec, *args_filter, '-map', arg_map, '-y', file_out
+            target_time = self.duration - start
             while True:
                 log.info('Transcode started')
                 Checker.is_end()
                 if self.type == 'video':
                     Pool.wait(log, encode_type)
                 p = Ffmpeg(args)
-                progress_bar = ProgressBar(log, self.duration)
+                progress_bar = ProgressBar(log, target_time)
                 if check_efficiency:
                     r, inefficient = p.poll_limit_size_display_time(size_allow, file_out, progress_bar)
                     if inefficient:
@@ -1333,9 +1334,9 @@ class Pool:
     _threads_id = -1
     _lock_264, _lock_av1, _lock_ss, _lock_work = (threading.Lock() for i in range(4))
     _cpu_percent = 0
-    _cpu_264 = 50
-    _cpu_av1 = 60
-    _cpu_ss = 90
+    _cpu_264 = 85
+    _cpu_av1 = 90
+    _cpu_ss = 95
     _prompt_264 = 'Waked up an x264 encoder'
     _prompt_av1 = 'Waked up an av1 encoder'
     _prompt_ss = 'Waked up a screenshooter'
@@ -1427,12 +1428,12 @@ class Pool:
                 Pool._waker(Pool._pool_ss, Pool._lock_ss, Pool._cpu_ss, Pool._prompt_ss)
             except EndExecution:
                 break
-        Pool._log.warning('Terminating, waking up all sleeping threads so they can end themselves')
+        Pool._log.warning('Terminating, any sleeping threads will be waked up so they can be properly terminated')
         for waitpool in Pool._pool_264, Pool._pool_av1, Pool._pool_ss:
             while waitpool:
                 waiter = waitpool.pop(0)
                 waiter.set()
-                Pool._log.debug(f'Emergency wakeup: {waiter}')
+                Pool._log.warning(f'Emergency wakeup: {waiter}')
         Pool._log.debug(f'Ending thread {threading.current_thread()}')
 
 
