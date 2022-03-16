@@ -335,6 +335,7 @@ class ProgressBar:
                 CleanPrinter.bars += 1
             self._complete = Duration()
             self._title_length = len(log.title)
+            self._percent = 0
             self._bar_complete = -1
             self._time_start = time.time()
             self._time_spent = Duration()
@@ -363,8 +364,7 @@ class ProgressBar:
                 self._bar_length = CleanPrinter.width - self._title_length - 4 * self._display_percent - 11 * self._display_remaining - 11 * self._display_encoded - 11 * self._display_spent
         if not self._display_bar:
             return
-        percent = self._complete / self._duration
-        bar_complete = int(percent * self._bar_length)
+        bar_complete = int(self._percent * self._bar_length)
         if bar_complete != self._bar_complete:
             bar_incomplete = self._bar_length - bar_complete
             self._bar_complete = bar_complete
@@ -372,13 +372,13 @@ class ProgressBar:
             self._bar_incomplete_str = '-' * bar_incomplete
         line_bar = self._bar_complete_str, self._bar_incomplete_str 
         if self._display_percent:
-            line_percent = f'{percent:>4.0%}'
+            line_percent = f'{self._percent:>4.0%}'
         else:
             line_percent = ''
         if self._display_remaining:
             time_spent = time.time() - self._time_start
-            if percent:
-                line_remaining = ' R:', Duration(time_spent / percent - time_spent).hms()
+            if self._percent:
+                line_remaining = ' R:', Duration(time_spent / self._percent - time_spent).hms()
             else:
                 line_remaining = ' R:', ProgressBar.invalid_time
         else:
@@ -394,10 +394,13 @@ class ProgressBar:
         print(''.join((self._log.title, *line_bar, *line_encoded, *line_spent, *line_remaining, line_percent, )), end='\r')
 
     def refresh(self, complete:Duration):
-        self._log.debug(f'Encoded {complete} / {self._duration} seconds')
+        percent = complete / self._duration
+        self._log.debug(f'Encoded {complete} / {self._duration} seconds, {percent:%}')
         if CleanPrinter.is_tty and complete - self._complete > 1:
             self._complete = complete
+            self._percent = percent
             self._display()
+        return percent
 
     def finish(self):
         if CleanPrinter.is_tty:
@@ -562,20 +565,20 @@ class Ffmpeg(Ffprobe):  # Note: as for GTX1070 (Pascal), nvenc accepts at most 3
         Ffmpeg.log.debug(f'Started {self.p}')
         while True:
             Checker.is_end(self.p)
-            if file_out.stat().size() >= size_allow:
-                self.p.terminate()
-                inefficient = True
-                break
             char = self.p.stderr.read(100)
             if char == b'':
                 progress_bar.finish()
-                inefficient = False
+                inefficient = file_out.stat().st_size >= size_allow
                 break
             chars.append(char)
             t = Ffmpeg.reg_time.findall(b''.join(chars).decode('utf-8'))
             if t:
                 complete = Duration(t[-1])
-                progress_bar.refresh(complete)
+                percent = progress_bar.refresh(complete)
+                if complete > 10 and file_out.stat().st_size >= size_allow * percent:
+                    self.p.terminate()
+                    inefficient = True
+                    break
                 chars = []
         Ffmpeg.log.debug(f'Ended {self.p}')
         self.returncode = self.p.wait()
@@ -738,7 +741,10 @@ class Video:
                     inputs += ['-i', file_stream]
                     input_id += 1
                     mappers += ['-map', f'{input_id}']
-            log.info(f'Muxing to {self.archive}...')
+            if encode_type == 'archive':
+                log.info(f'Muxing to {self.archive}...')
+            else:
+                log.info(f'Muxing to {self.preview}...')
             file_work = self.work / f'{self.name}_{encode_type}.mkv'
             args = (*inputs, '-c', 'copy', *mappers, '-map_metadata', metadata, '-y', file_work)
             while Ffmpeg(args, null=True).poll_dumb():
@@ -802,7 +808,7 @@ class Stream:
         self.type = stream_type
         self.duration = stream_duration
         self.size = stream_size
-        self.lossless = Stream.lossless[self.type]
+        self.lossless = stream_info['codec_name']  in Stream.lossless[stream_type]
         if self.type == 'video':
             self.width = stream_info['width']
             self.height = stream_info['height']
@@ -814,7 +820,7 @@ class Stream:
     def _copy(self, log:LoggingWrapper, prefix:str, file_out:pathlib.Path, file_done:pathlib.Path):
         log.info('Transcode inefficient, copying raw stream instead')
         file_copy = self.parent.work / f'{prefix}_copy.nut'
-        args = ('-i', self.parent.path, '-c', 'copy', '-map', f'0:{self.id}', '-y', file_copy)
+        args = ('-i', self.parent.raw, '-c', 'copy', '-map', f'0:{self.id}', '-y', file_copy)
         while Ffmpeg(args, null=True).poll_dumb():
             Checker.is_end()
             log.warning('Stream copy failed, trying that later')
