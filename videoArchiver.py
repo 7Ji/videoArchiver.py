@@ -1154,36 +1154,41 @@ class Checker:
 
 class Database:
 
-    def __init__(self, backend):
-        self.lock = threading.RLock()
-        self.log = LoggingWrapper('[Database]')
-        self.backend = backend
-        self.db = {}
-        self.read()
+    def __init__(self, backend, dir_raw, dir_archive, dir_preview, dir_screenshot):
+        self._lock = threading.Lock()
+        self._log_db = LoggingWrapper('[Database] DB')
+        self._log_scan = LoggingWrapper('[Database] SC')
+        self._backend = backend
+        self._raw = dir_raw
+        self._archive = dir_archive
+        self._preview = dir_preview
+        self._screenshot = dir_screenshot
+        with self._lock:
+            self._db = {}
+            self._read()
 
     def __iter__(self):
-        with Checker.context(self.lock):
-            return iter(self.db)
+        with Checker.context(self._lock):
+            return iter(self._db)
 
     def dict(self):
         """Return the database as dict, currently this just means return the db
         """
-        with Checker.context(self.lock):
-            return self.db
+        with Checker.context(self._lock):
+            return self._db
 
     def items(self):
-        with Checker.context(self.lock):
-            return self.db.items()
+        with Checker.context(self._lock):
+            return self._db.items()
 
-    def read(self):
-        with Checker.context(self.lock):
-            if self.backend.exists():
+    def _read(self):
+        if self._backend.exists():
+            Checker.is_end()
+            with open(self._backend, 'rb') as f:
                 Checker.is_end()
-                with open(self.backend, 'rb') as f:
-                    Checker.is_end()
-                    self.db = pickle.load(f)
+                self._db = pickle.load(f)
 
-    def write(self):
+    def _write(self):
         """Write the db if it's updated
 
         used in cleaner (scope: child/cleaner)
@@ -1196,33 +1201,30 @@ class Database:
         scope: main
             End when KeyboardException is captured
         """
-        with Checker.context(self.lock):
-            self.log.info('Updated')
-            with Checker.context(open(self.backend, 'wb')) as f:
-                pickle.dump(self.db, f)
-            self.log.info('Saved')
-
+        self._log_db.info('Updated')
+        with Checker.context(open(self._backend, 'wb')) as f:
+            pickle.dump(self._db, f)
+        self._log_db.info('Saved')
+            
     def add(self, key, value):
-        with Checker.context(self.lock):
-            if key not in self.db:
-                self.db[key] = value
-                self.log.info(f'Added {key}')
-                self.write()
+        with Checker.context(self._lock):
+            if key not in self._db:
+                self._db[key] = value
+                self._log_db.info(f'Added {key}')
+                self._write()
 
     def remove(self, key):
-        with Checker.context(self.lock):
-            if key in self.db:
-                del self.db[key]
-                self.log.info(f'Removed {key}')
-                self.write()
-
+        with Checker.context(self._lock):
+            if key in self._db:
+                del self._db[key]
+                self._log_db.info(f'Removed {key}')
+                self._write()
     
     def query(self, key):
-        with Checker.context(self.lock):
-            if key in self.db:
+        with Checker.context(self._lock):
+            if key in self._db:
                 return True
             return False
-
 
     def clean(self):
         """Cleaning the db, remove files not existing or already finished
@@ -1232,35 +1234,94 @@ class Database:
         scope: main
             End when KeyboardException is captured
         """
-        with Checker.context(self.lock):
+        with Checker.context(self._lock):
             db_new = {}
-            for i_r, j_r in {i:j for i, j in self.db.items() if i.exists()}.items():
+            for path, video in {i:j for i, j in self._db.items() if i.exists()}.items():
                 Checker.is_end()
-                name = f'{i_r.stem}.mkv'
+                name = f'{path.stem}.mkv'
                 finish = False
-                if (dir_archive / name).exists() and (dir_preview / name).exists():
-                    dir_screenshot_sub = dir_screenshot / f'{i_r.stem}'
+                if (self._archive / name).exists() and (self._preview / name).exists():
+                    dir_screenshot_sub = self._screenshot / f'{path.stem}'
                     if dir_screenshot_sub.exists():
                         if dir_screenshot_sub.is_file():
-                            if i_r.exists():
+                            if path.exists():
                                 finish = True
                         elif dir_screenshot_sub.is_dir():
                             finish = True
-                            for stream_id, stream in enumerate(j_r):
+                            for stream_id, stream in enumerate(video):
                                 Checker.is_end()
                                 if stream is not None and stream['type'] == 'video':
-                                    if not (dir_screenshot_sub / f'{i_r.stem}_{stream_id}.jpg').exists():
+                                    if not (dir_screenshot_sub / f'{path.stem}_{stream_id}.jpg').exists():
                                         finish = False
                                         break
-                if finish and i_r.exists():
-                    i_r.unlink()
-                    self.log.warning(f'Purged already finished video {i_r}')
+                if finish and path.exists():
+                    path.unlink()
+                    self._log_db.warning(f'Purged already finished video {path}')
                 else:
-                    db_new[i_r] = j_r
-            if self.db != db_new:
-                self.db = db_new
-                self.write()
+                    db_new[path] = video
+            if self._db != db_new:
+                self._db = db_new
+                self._write()
 
+    def _wait_close(self, file:pathlib.Path):
+        size_old = file.stat().st_size
+        hint = False
+        while True:
+            opened = False
+            for p in psutil.process_iter():
+                try:
+                    for f in p.open_files():
+                        if file.samefile(f.path):
+                            if not hint:
+                                self._log_scan.warning(f'Jammed, {file} is opened by {p.pid} {p.cmdline()}')
+                                hint = True
+                            opened = True
+                            break
+                except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError):
+                    pass
+            size_new = file.stat().st_size
+            if size_new != size_old:
+                opened = True
+                if not hint:
+                    self._log_scan.warning(f'Jammed, {file} is being written')
+            if not opened:
+                if hint:
+                    self._log_scan.info(f'{file} closed writing, continue scanning')
+                break
+            size_old = size_new
+            Checker.sleep(5)
+
+    def _scan_dir(self, d: pathlib.Path):
+        self._log_scan.debug(f'Scanning {d}')
+        for i in d.iterdir():
+            if i.is_dir():
+                self._scan_dir(i)
+            elif i.is_file() and not i in self._db:
+                self._wait_close(i)
+                if not i in self._db:
+                    self._log_scan.info(f'Discovered {i}')
+                    try:
+                        db_entry = Video(i)
+                        self._log_scan.info(f'Added {i} to db')
+                        self._log_scan.debug(f'{i} streams: {db_entry.streams}')
+                    except NotVideo:
+                        db_entry = None
+                    except EndExecution:
+                        return
+                self._db[i] = db_entry
+
+    def scan(self):
+        try:
+            while True:
+                with Checker.context(self._lock):
+                    self._scan_dir(self._raw)
+                Checker.sleep(5)
+        except EndExecution:
+            with self._lock:
+                with open(self._backend, 'wb') as f:
+                    pickle.dump(self._db, f)
+            self._log_db.info('Saved')
+            
 
 class Pool:
     _pool_264, _pool_av1, _pool_ss, _pool_work, _threads_archive, _threads_preview, _threads_muxer, _threads_screenshot = ([] for i in range(8))
@@ -1370,70 +1431,6 @@ class Pool:
         Pool._log.debug(f'Ending thread {threading.current_thread()}')
 
 
-def wait_close(file_raw:pathlib.Path):
-    """Check if a file is being opened, if it is, wait until it's closed
-
-    used in scan_dir (scope: main)
-
-    scope: main
-        End when KeyboardException is captured
-    """
-    size_old = file_raw.stat().st_size
-    hint = False
-    while True:
-        opened = False
-        for p in psutil.process_iter():
-            try:
-                for f in p.open_files():
-                    if file_raw.samefile(f.path):
-                        if not hint:
-                            log_scanner.warning(f'Jammed, {file_raw} is opened by {p.pid} {p.cmdline()}')
-                            hint = True
-                        opened = True
-                        break
-            except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError):
-                pass
-        size_new = file_raw.stat().st_size
-        if size_new != size_old:
-            opened = True
-            if not hint:
-                log_scanner.warning(f'Jammed, {file_raw} is being written')
-        if not opened:
-            if hint:
-                log_scanner.info(f'{file_raw} closed writing, continue scanning')
-            break
-        size_old = size_new
-        Checker.sleep(5)
-
-
-def scan_dir(d: pathlib.Path):
-    """Recursively scan dirs, 
-
-    used in main (scope: main)
-    used in scan_dir recursively (scope: main)
-    
-    scope: main
-        End when KeyboardException is captured
-    """
-    log_scanner.debug(f'Scanning {d}')
-    for i in d.iterdir():
-        if i.is_dir():
-            scan_dir(i)
-        elif i.is_file() and not db.query(i):
-            wait_close(i)
-            if not db.query(i):
-                log_scanner.info(f'Discovered {i}')
-                try:
-                    db_entry = Video(i)
-                    log_scanner.info(f'Added {i} to db')
-                    log_scanner.debug(f'{i} streams: {db_entry.streams}')
-                except NotVideo:
-                    db_entry = None
-                except EndExecution:
-                    return
-            db.add(i, db_entry)
-
-
 # The main function starts here
 if __name__ == '__main__':
     dir_raw = pathlib.Path('raw')
@@ -1450,17 +1447,17 @@ if __name__ == '__main__':
         format='%(asctime)s %(levelname)s: %(message)s',
         level=logging.DEBUG
     )
-    work, dirs_work_sub = ([] for i in range(2))
+    dirs_work_sub = ([] for i in range(2))
     work_end = False
-    db = Database(dir_work / 'db.pkl')
+    db = Database(dir_work / 'db.pkl', dir_raw, dir_archive, dir_preview, dir_screenshot)
     log_main = LoggingWrapper('[Main]')
     log_scanner = LoggingWrapper('[Scanner]')
     log_main.info('Started')
     threading.Thread(target = Pool.scheduler).start()
+    threading.Thread(target = db.scan).start()
     try:
         while True:
             db.clean()
-            scan_dir(dir_raw)
             for path, video in db.items():
                 if video is not None and not Pool.query_work(path):
                     dir_work_sub = dir_work / video.name
@@ -1477,7 +1474,6 @@ if __name__ == '__main__':
         log_main.warning('Keyboard Interrupt received, exiting safely...')
         for thread in threading.enumerate(): 
             log_main.debug(f'Alive thread before exiting: {thread.name}')
-        db.write()
         Pool.wake()
         Checker.end()
         hint = False
