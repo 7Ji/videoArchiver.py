@@ -903,7 +903,7 @@ class Stream:
                                 if time_delta:
                                     start += time_delta
                                     size_exist += size_delta
-                                    log.warning(f'Recovered: {file_check}, Duration: {time_delta}, size: {size_delta}. Total: Duration:{start}, size: {size_exist}')
+                                    log.warning(f'Recovered: {file_check}, {time_delta} seconds, {size_delta} bytes. Total: {start} seconds, {size_exist} bytes')
                                     concat_list.append(file_check.name)
                                 else:
                                     log.warning(f'Unable to recovery: {file_check}, skipped')
@@ -942,10 +942,11 @@ class Stream:
                                     log.warning('Recovery failed, retrying that later')
                                 else:
                                     start += t
-                                    size_exist += file_recovery.stat().st_size
+                                    size_delta = file_recovery.stat().st_size
+                                    size_exist += size_delta
                                     shutil.move(file_recovery, file_check)
                                     concat_list.append(file_check.name)
-                                    log.info(f'{t} of failed transcode recovered. Total: duration:{start}, size{size_exist}')
+                                    log.info(f'Recovered: last interrupt transcode, {t} seconds, {size_delta} bytes. Total: {start} seconds, {size_exist} bytes')
                                     break
                         with Checker.context(open(file_concat_pickle, 'wb')) as f:
                             pickle.dump((concat_list, start, size_exist), f)
@@ -1426,7 +1427,7 @@ class Pool:
                 Pool._waker(Pool._pool_ss, Pool._lock_ss, Pool._cpu_ss, Pool._prompt_ss)
             except EndExecution:
                 break
-        Pool._log.warning('Terminating, waking up all sleeping threads so they can end themselvies')
+        Pool._log.warning('Terminating, waking up all sleeping threads so they can end themselves')
         for waitpool in Pool._pool_264, Pool._pool_av1, Pool._pool_ss:
             while waitpool:
                 waiter = waitpool.pop(0)
