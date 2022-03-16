@@ -1334,9 +1334,9 @@ class Pool:
     _threads_id = -1
     _lock_264, _lock_av1, _lock_ss, _lock_work = (threading.Lock() for i in range(4))
     _cpu_percent = 0
-    _cpu_264 = 85
-    _cpu_av1 = 90
-    _cpu_ss = 95
+    _cpu_264 = 50
+    _cpu_av1 = 60
+    _cpu_ss = 90
     _prompt_264 = 'Waked up an x264 encoder'
     _prompt_av1 = 'Waked up an av1 encoder'
     _prompt_ss = 'Waked up a screenshooter'
