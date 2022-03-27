@@ -873,7 +873,7 @@ class Stream:
             log = LoggingWrapper(f'[{self.parent.name}] E:{encode_type[:1].upper()} S:{self.id}:{self.type[:1].upper()}')
             prefix = f'{self.parent.name}_{encode_type}_{self.id}_{self.type}'
         log.info('Work started')
-        check_efficiency = encode_type == 'archive'  and not self.lossless 
+        check_efficiency = not (encode_type == 'preview' and amix == True) 
         concat_list = []
         start = Duration()
         size_exist = 0
@@ -1457,7 +1457,6 @@ if __name__ == '__main__':
     work_end = False
     db = Database(dir_work / 'db.pkl', dir_raw, dir_archive, dir_preview, dir_screenshot)
     log_main = LoggingWrapper('[Main]')
-    log_scanner = LoggingWrapper('[Scanner]')
     log_main.info('Started')
     threading.Thread(target = Pool.scheduler).start()
     threading.Thread(target = db.scan).start()
