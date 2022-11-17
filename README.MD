@@ -1,3 +1,6 @@
+**ARCHIVED UNTIL I FINISH MY 2023 POST-GRADUATTE ADMISSION EXAM ON DEC 24TH AND 25TH  
+归档至23考研结束**
+
 # videoArchiver.py
 ### A multithreading video archiving script, generating both archive-level and preview-level AV1 video footages and N by N montage snapshots with ease, so you can easily store the big archive guy to the cold storage and keep the tiny preview footage and snapshots by hand to save your precious disk space. 
 ### With stream level multithreading and interrupt-proof recovery support, using the videoArchiver.service file coming with it, you can easily set it up as a daemon, and let it run forever.
